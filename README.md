@@ -1,7 +1,7 @@
 # doppler-locate
 
-!> [!IMPORTANT]
-> Some of this code was written by Claude Opus 5.5 and Fable 5.2. 
+> [!IMPORTANT]
+> Some of this code was written by Claude Opus 5.5 and Fable 5.2.
 
 Did you know that the change in pitch of overhead aircraft leaks your positions
 in most videos that you record? With a little bit of effort, you can deduce the
