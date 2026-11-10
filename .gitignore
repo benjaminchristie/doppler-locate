@@ -1,0 +1,8 @@
+# recordings and their results
+clips/
+# flight index (about 2 GB per day) and terrain tiles
+data/
+
+__pycache__/
+*.so
+*.log

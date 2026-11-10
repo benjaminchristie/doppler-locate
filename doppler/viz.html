@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doppler Locate</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+<style>
+  :root { --bg: #111; --panel: #1b1b1b; --line: #333; --text: #eee; --dim: #999; --accent: #ff9900; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font: 15px "Palatino Linotype", Palatino, "Book Antiqua", serif; }
+  #app { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 1fr 240px; height: 100vh; }
+  #map { grid-column: 1; grid-row: 1; position: relative; }
+  #specwrap { grid-column: 1; grid-row: 2; position: relative; border-top: 1px solid var(--line); background: #000; }
+  #spec, #specov { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #specov { cursor: crosshair; }
+  #panel { grid-column: 2; grid-row: 1 / span 2; background: var(--panel); border-left: 1px solid var(--line);
+    padding: 14px 16px; overflow-y: auto; }
+  h1 { font-size: 20px; margin: 0 0 10px; font-weight: normal; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    margin: 18px 0 6px; font-weight: normal; }
+  .big { font-size: 22px; color: var(--accent); }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { padding: 3px 4px; text-align: right; border-bottom: 1px solid var(--line); }
+  td:first-child, th:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: normal; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  .peak { cursor: pointer; } .peak:hover { color: var(--accent); }
+  label { display: flex; justify-content: space-between; color: var(--dim); font-size: 14px; margin-top: 8px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  audio { width: 100%; margin-top: 6px; }
+  .seg button { background: none; color: var(--text); border: 1px solid var(--line); padding: 4px 10px;
+    font: inherit; font-size: 14px; cursor: pointer; }
+  .seg button.on { border-color: var(--accent); color: var(--accent); }
+  #status { position: absolute; left: 10px; top: 10px; background: rgba(0,0,0,.6); padding: 4px 8px;
+    border-radius: 4px; font-size: 13px; pointer-events: none; }
+  @media (max-width: 800px) {
+    html, body { overflow: auto; }
+    #app { grid-template-columns: 1fr; grid-template-rows: 55vh 200px auto; height: auto; }
+    #panel { grid-column: 1; grid-row: 3; border-left: none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"><div id="status">click the map to test a location</div></div>
+  <div id="specwrap"><canvas id="spec"></canvas><canvas id="specov"></canvas></div>
+  <div id="panel">
+    <h1>Doppler locate</h1>
+    <div id="warn" style="display:none;color:#ff6b6b;margin-bottom:8px">No confident match in this area.</div>
+    <div class="big" id="score">–</div>
+    <div class="mono" id="where">–</div>
+    <audio id="audio" controls preload="auto"></audio>
+    <h2>Aircraft heard here</h2>
+    <table id="tbl"><thead><tr><th>icao</th><th>z</th><th>f0 Hz</th><th>closest</th></tr></thead><tbody></tbody></table>
+    <h2>Best peaks</h2>
+    <div id="peaks"></div>
+    <h2>View</h2>
+    <label>clock offset <span id="dtv">0.00 s</span></label>
+    <input id="dt" type="range" step="0.25">
+    <label>heatmap <span id="opv"></span></label>
+    <input id="op" type="range" min="0" max="1" step="0.05" value="0.75">
+    <div class="seg" style="margin-top:10px"><button id="bsat" class="on">Satellite</button><button id="bosm">Map</button></div>
+  </div>
+</div>
+<script>
+const D = /*DATA*/null;
+const R = 6371000, CENTS = 1200 / Math.LN2, RMAX = 8000, ZMIN = 3;
+const SP = D.spec, F = SP.F, K = SP.K, BONUS = Math.sqrt(2 * Math.log(K));
+const lat0 = (D.bbox[0] + D.bbox[1]) / 2, lon0 = (D.bbox[2] + D.bbox[3]) / 2;
+const kx = Math.PI / 180 * R * Math.cos(lat0 * Math.PI / 180), ky = Math.PI / 180 * R;
+const enu = (lat, lon) => [(lon - lon0) * kx, (lat - lat0) * ky];
+const COLORS = [[255,153,0],[80,200,255],[140,255,120],[255,90,160],[200,160,255],[255,230,90]];
+
+for (const s of D.segs) {
+  s.e = s.lon.map(v => (v - lon0) * kx); s.n = s.lat.map(v => (v - lat0) * ky); s.N = s.lat.length;
+  s.path = s.lat.map((la, i) => [s.lon[i], la, s.alt[i]]);
+}
+const q = Uint8Array.from(atob(SP.q), c => c.charCodeAt(0));
+const Lf = new Float32Array(q.length);
+for (let i = 0; i < q.length; i++) Lf[i] = (q[i] - 64) / 32 * SP.sigma;
+const ftime = f => SP.t0 + f * SP.hop;
+
+// forward model, same as mf.cpp
+function at(s, tau) {
+  const pos = (tau - s.t0) / s.dt;
+  if (pos < 0 || pos > s.N - 1.001) return null;
+  const i = Math.floor(pos), w = pos - i, L = a => a[i] + w * (a[i + 1] - a[i]);
+  return [L(s.e), L(s.n), L(s.alt), L(s.ve), L(s.vn), L(s.vu), L(s.lat), L(s.lon)];
+}
+function emit(s, T, ox, oy, oz) {
+  let tau = T, p, r = 0, d;
+  for (let it = 0; it < 5; it++) {
+    p = at(s, tau); if (!p) return null;
+    d = [p[0] - ox, p[1] - oy, p[2] - oz]; r = Math.hypot(d[0], d[1], d[2]); tau = T - r / D.c;
+  }
+  return { p, r, rdot: (d[0] * p[3] + d[1] * p[4] + d[2] * p[5]) / r };
+}
+function scoreAt(lat, lon, dt) {
+  const [ox, oy] = enu(lat, lon), oz = D.elev, E = new Float32Array(K), list = [];
+  let total = 0;
+  for (const s of D.segs) {
+    if (s.kind === 'jet' && !D.jets) continue;  // jets only if the search used them
+    E.fill(0); let n = 0, rmin = Infinity; const sh = new Int32Array(F).fill(-1e6);
+    for (let f = 0; f < F; f++) {
+      const em = emit(s, ftime(f) + dt, ox, oy, oz);
+      if (!em || em.r > RMAX) continue;
+      rmin = Math.min(rmin, em.r); n++;
+      const k = Math.round(-Math.log1p(em.rdot / D.c) * CENTS / SP.cents); sh[f] = k;
+      const lo = Math.max(0, -k), hi = Math.min(K, K - k), base = f * K + k;
+      for (let j = lo; j < hi; j++) E[j] += Lf[base + j];
+    }
+    if (n < 10) continue;
+    let best = -Infinity, arg = 0;
+    for (let j = 0; j < K; j++) if (E[j] > best) { best = E[j]; arg = j; }
+    const z = best / n * Math.sqrt(n * 0.5) / SP.sigma - BONUS;
+    total += Math.max(z - ZMIN, 0);
+    list.push({ s, z, rmin, sh, arg, f0: SP.fmin * Math.pow(2, arg * SP.cents / 1200) });
+  }
+  list.sort((a, b) => b.z - a.z);
+  list.forEach((it, i) => it.color = it.z > ZMIN ? COLORS[i % COLORS.length] : [170, 170, 170]);
+  return { total, list };
+}
+
+// state
+const st = { lat: null, lon: null, dt: 0, t: 0, res: null, basemap: 'sat', op: 0.75 };
+const $ = id => document.getElementById(id);
+const audio = $('audio'); audio.src = D.audio;
+$('dt').min = -D.clockTol; $('dt').max = D.clockTol; $('dt').value = 0;
+$('opv').textContent = '75%';
+
+// map
+const first = D.results[0] || { lat: lat0, lon: lon0 };
+const map = new maplibregl.Map({
+  container: 'map', center: [first.lon, first.lat], zoom: 12, pitch: 45, bearing: -15, maxPitch: 80,
+  style: { version: 8, sources: {
+      sat: { type: 'raster', tileSize: 256, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'] },
+      osm: { type: 'raster', tileSize: 256, attribution: 'Tiles © Esri',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'] } },
+    layers: [{ id: 'sat', type: 'raster', source: 'sat' },
+             { id: 'osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } }] }
+});
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+const overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+map.addControl(overlay);
+map.on('click', e => select(e.lngLat.lat, e.lngLat.lng));
+
+function layers() {
+  const hot = new Set((st.res ? st.res.list : []).filter(i => i.z > ZMIN).map(i => i.s.icao));
+  const col = new Map((st.res ? st.res.list : []).map(i => [i.s.icao, i.color]));
+  const now = [], rays = [];
+  const [ox, oy] = st.lat === null ? [0, 0] : enu(st.lat, st.lon);
+  for (const s of D.segs) {
+    const p = at(s, st.t + st.dt);
+    if (p) now.push({ s, pos: [p[7], p[6], p[2]] });
+    if (st.lat !== null) {
+      const em = emit(s, st.t + st.dt, ox, oy, D.elev);
+      if (em && em.r < RMAX) rays.push({ s, from: [st.lon, st.lat, D.elev], to: [em.p[7], em.p[6], em.p[2]] });
+    }
+  }
+  const c = s => hot.has(s.icao) ? col.get(s.icao) : [230, 230, 230];
+  const L = [
+    new deck.BitmapLayer({ id: 'heat', image: D.heat.png, opacity: st.op,
+      bounds: [D.bbox[2], D.bbox[0], D.bbox[3], D.bbox[1]] }),
+    new deck.PathLayer({ id: 'tracks', data: D.segs, getPath: s => s.path, widthUnits: 'pixels',
+      getWidth: s => hot.has(s.icao) ? 3.5 : s.kind === 'jet' && !D.jets ? 0.8 : 1.2,
+      getColor: s => [...c(s), hot.has(s.icao) ? 255 : s.kind === 'jet' && !D.jets ? 45 : 110],
+      updateTriggers: { getWidth: [...hot].join(), getColor: [...hot].join() } }),
+    new deck.LineLayer({ id: 'rays', data: rays, getSourcePosition: d => d.from, getTargetPosition: d => d.to,
+      getColor: d => [...c(d.s), hot.has(d.s.icao) ? 230 : 60], getWidth: d => hot.has(d.s.icao) ? 2 : 1 }),
+    new deck.ScatterplotLayer({ id: 'now', data: now, getPosition: d => d.pos, radiusUnits: 'pixels',
+      getRadius: d => hot.has(d.s.icao) ? 6 : 3.5, getFillColor: d => c(d.s),
+      stroked: true, getLineColor: [0, 0, 0], lineWidthUnits: 'pixels', getLineWidth: 1 }),
+    new deck.ScatterplotLayer({ id: 'peaks', data: D.results.map((r, i) => ({ ...r, i })),
+      getPosition: d => [d.lon, d.lat, 0], radiusUnits: 'pixels', getRadius: 5, filled: false, stroked: true,
+      getLineColor: [255, 255, 255], lineWidthUnits: 'pixels', getLineWidth: 2 }),
+    new deck.TextLayer({ id: 'peaklbl', data: D.results.map((r, i) => ({ ...r, i })),
+      getPosition: d => [d.lon, d.lat, 0], getText: d => String(d.i + 1), getSize: 15, getPixelOffset: [12, -12],
+      getColor: [255, 255, 255], fontFamily: 'Palatino Linotype, Palatino, serif',
+      outlineWidth: 3, outlineColor: [0, 0, 0], fontSettings: { sdf: true } }),
+  ];
+  if (D.truth.length === 2) L.push(new deck.ScatterplotLayer({ id: 'truth', data: [D.truth],
+    getPosition: d => [d[1], d[0], 0], radiusUnits: 'pixels', getRadius: 10, filled: false, stroked: true,
+    getLineColor: [80, 170, 255], lineWidthUnits: 'pixels', getLineWidth: 3 }));
+  if (st.lat !== null) L.push(new deck.ScatterplotLayer({ id: 'obs', data: [[st.lon, st.lat]],
+    getPosition: d => [d[0], d[1], 0], radiusUnits: 'pixels', getRadius: 7, getFillColor: [255, 153, 0],
+    stroked: true, getLineColor: [0, 0, 0], lineWidthUnits: 'pixels', getLineWidth: 2 }));
+  return L;
+}
+const render = () => overlay.setProps({ layers: layers() });
+
+// spectrogram
+const spec = $('spec'), ov = $('specov');
+const off = document.createElement('canvas'); off.width = F; off.height = K;
+(function paint() {
+  const stops = [[0,0,0],[40,10,80],[140,30,120],[240,90,60],[255,200,80],[255,255,220]];
+  const img = off.getContext('2d').createImageData(F, K);
+  for (let f = 0; f < F; f++) for (let k = 0; k < K; k++) {
+    const v = Math.min(Math.max((q[f * K + k] - 64) / 110, 0), 0.999) * (stops.length - 1);
+    const a = Math.floor(v), w = v - a, o = ((K - 1 - k) * F + f) * 4;
+    for (let c = 0; c < 3; c++) img.data[o + c] = stops[a][c] + w * (stops[a + 1][c] - stops[a][c]);
+    img.data[o + 3] = 255;
+  }
+  off.getContext('2d').putImageData(img, 0, 0);
+})();
+function sizeCanvas(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); return d;
+}
+function drawSpec() {
+  sizeCanvas(spec); const g = spec.getContext('2d');
+  g.imageSmoothingEnabled = true; g.drawImage(off, 0, 0, spec.width, spec.height);
+  drawOverlay();
+}
+const fx = (f, W) => (f + 0.5) / F * W, ky_ = (k, H) => H * (1 - (k + 0.5) / K);
+function drawOverlay() {
+  const d = sizeCanvas(ov), g = ov.getContext('2d'), W = ov.width, H = ov.height;
+  g.clearRect(0, 0, W, H);
+  g.font = `${13 * d}px "Palatino Linotype", Palatino, serif`; g.fillStyle = '#ddd';
+  for (const hz of [50, 100, 200, 300, 500, 1000, 2000]) {
+    const k = 1200 * Math.log2(hz / SP.fmin) / SP.cents; if (k < 0 || k >= K) continue;
+    const y = ky_(k, H); g.fillRect(0, y, 6 * d, 1 * d); g.fillText(hz + ' Hz', 9 * d, y + 4 * d);
+  }
+  const span = F * SP.hop, stepT = span > 300 ? 60 : span > 90 ? 15 : 5;
+  for (let t = stepT; t < span; t += stepT) {
+    const x = (t - SP.t0) / SP.hop / F * W; g.fillRect(x, H - 6 * d, 1 * d, 6 * d);
+    g.fillText(t + ' s', x + 3 * d, H - 8 * d);
+  }
+  if (st.res) for (const it of st.res.list.slice(0, 8)) {
+    if (it.z < 1) continue;
+    g.strokeStyle = `rgba(${it.color.join()},${it.z > ZMIN ? 0.95 : 0.45})`; g.lineWidth = (it.z > ZMIN ? 2 : 1) * d;
+    g.setLineDash(it.z > ZMIN ? [] : [4 * d, 4 * d]);
+    for (const h of [1, 2]) {  // fundamental and 2nd harmonic
+      const kh = Math.round(1200 * Math.log2(h) / SP.cents); g.beginPath(); let pen = false;
+      for (let f = 0; f < F; f++) {
+        if (it.sh[f] < -1e5) { pen = false; continue; }
+        const x = fx(f, W), y = ky_(it.arg + it.sh[f] + kh, H);
+        pen ? g.lineTo(x, y) : g.moveTo(x, y); pen = true;
+      }
+      g.globalAlpha = h === 1 ? 1 : 0.4; g.stroke(); g.globalAlpha = 1;
+    }
+  }
+  g.setLineDash([]);
+  const x = (st.t - SP.t0) / SP.hop / F * W;
+  g.strokeStyle = '#fff'; g.lineWidth = 1.5 * d; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+}
+ov.addEventListener('click', e => {
+  const r = ov.getBoundingClientRect();
+  audio.currentTime = Math.max(0, SP.t0 + (e.clientX - r.left) / r.width * F * SP.hop);
+});
+
+// panel
+function select(lat, lon) {
+  st.lat = lat; st.lon = lon;
+  $('status').textContent = 'scoring…';
+  setTimeout(() => {
+    st.res = scoreAt(lat, lon, st.dt);
+    $('status').textContent = 'click the map to test a location';
+    $('score').textContent = `score ${st.res.total.toFixed(1)}`;
+    $('where').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    $('tbl').querySelector('tbody').innerHTML = st.res.list.slice(0, 10).map(it =>
+      `<tr><td><span class="sw" style="background:rgb(${it.color.join()})"></span>${it.s.icao}` +
+      ` <span style="color:var(--dim)">${it.s.kind && it.s.kind !== 'unknown' ? it.s.kind : ''}</span></td>` +
+      `<td>${it.z.toFixed(1)}</td><td>${it.z > 1 ? it.f0.toFixed(0) : '–'}</td>` +
+      `<td>${(it.rmin / 1000).toFixed(1)} km</td></tr>`).join('');
+    render(); drawOverlay();
+  }, 10);
+}
+$('peaks').innerHTML = D.results.map((r, i) =>
+  `<div class="peak mono" data-i="${i}">${i + 1}. ${r.lat.toFixed(5)}, ${r.lon.toFixed(5)} · ${r.score.toFixed(1)}</div>`).join('')
+  || '<div style="color:var(--dim)">none</div>';
+$('peaks').addEventListener('click', e => {
+  const el = e.target.closest('.peak'); if (!el) return;
+  const r = D.results[+el.dataset.i];
+  st.dt = r.clock_offset; $('dt').value = r.clock_offset; $('dtv').textContent = r.clock_offset.toFixed(2) + ' s';
+  map.flyTo({ center: [r.lon, r.lat], zoom: 13, pitch: 55 }); select(r.lat, r.lon);
+});
+$('dt').addEventListener('input', e => {
+  st.dt = +e.target.value; $('dtv').textContent = st.dt.toFixed(2) + ' s';
+  if (st.lat !== null) select(st.lat, st.lon);
+});
+$('op').addEventListener('input', e => { st.op = +e.target.value; $('opv').textContent = Math.round(st.op * 100) + '%'; render(); });
+for (const [id, vis] of [['bsat', 'sat'], ['bosm', 'osm']]) $(id).addEventListener('click', () => {
+  map.setLayoutProperty('sat', 'visibility', vis === 'sat' ? 'visible' : 'none');
+  map.setLayoutProperty('osm', 'visibility', vis === 'osm' ? 'visible' : 'none');
+  $('bsat').classList.toggle('on', vis === 'sat'); $('bosm').classList.toggle('on', vis === 'osm');
+});
+function tick() {
+  st.t = audio.currentTime; render(); drawOverlay();
+  if (!audio.paused) requestAnimationFrame(tick);
+}
+audio.addEventListener('play', tick); audio.addEventListener('seeked', tick);
+window.addEventListener('resize', drawSpec);
+drawSpec();
+// one pass fits a whole line of places; it takes two aircraft to pin one
+// and the best spot has to clearly beat the best one elsewhere (chance matches in real soundscapes)
+const R0 = D.results[0] || {};
+if (!D.results.length || R0.score < 3 || (R0.support ?? 2) < 2 || (R0.margin ?? 9) < 1.3) $('warn').style.display = 'block';
+if (D.results.length) { const r = D.results[0]; st.dt = r.clock_offset; $('dt').value = r.clock_offset;
+  $('dtv').textContent = r.clock_offset.toFixed(2) + ' s'; select(r.lat, r.lon); } else render();
+map.on('style.load', render);
+</script>
+</body>
+</html>

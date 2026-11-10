@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doppler Find</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+<style>
+  :root { --bg: #0f0f10; --panel: #18181a; --line: #2c2c30; --text: #ececec; --dim: #9a9aa0; --accent: #ff9900;
+    --bad: #ff6b6b; --good: #7bd88f; --spec: 290px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font: 15px "Palatino Linotype", Palatino, "Book Antiqua", serif; }
+  #app { display: grid; grid-template-columns: 1fr 390px; grid-template-rows: 1fr var(--spec); height: 100vh; }
+  #map { grid-column: 1; grid-row: 1; position: relative; min-height: 0; }
+  #specs { grid-column: 1; grid-row: 2; display: grid; grid-template-rows: 6px 56px 1fr; background: #000; min-height: 0; }
+  #grip { background: var(--line); cursor: row-resize; touch-action: none; }
+  #grip:hover, #grip.on { background: var(--accent); }
+  .cv { position: relative; min-height: 0; touch-action: none; user-select: none; }
+  .cv canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #ovw { border-bottom: 1px solid var(--line); cursor: pointer; }
+  #zm { cursor: grab; } #zm.drag { cursor: grabbing; }
+  #zbar { position: absolute; right: 8px; top: 6px; display: flex; gap: 4px; }
+  #zbar button { background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 3px;
+    font: inherit; font-size: 14px; padding: 1px 9px; cursor: pointer; }
+  #zbar button:hover { border-color: var(--accent); color: var(--accent); }
+  #panel { grid-column: 2; grid-row: 1 / span 2; background: var(--panel); border-left: 1px solid var(--line);
+    padding: 16px 18px; overflow-y: auto; }
+  .verdict { font-size: 26px; margin: 0 0 2px; }
+  .verdict.ok { color: var(--accent); } .verdict.no { color: var(--bad); }
+  .where { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; }
+  .where a { color: var(--text); }
+  .link { color: var(--dim); cursor: pointer; font: 13px "Palatino Linotype", Palatino, serif; margin-left: 6px; }
+  .link:hover { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 14px; margin-top: 2px; }
+  .bar { height: 6px; background: #2a2a2e; border-radius: 3px; margin: 8px 0 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 20px 0 6px;
+    font-weight: normal; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { padding: 4px 4px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--dim); font-weight: normal; font-size: 13px; }
+  td.r, th.r { text-align: right; }
+  tr.row { cursor: pointer; } tr.row:hover td { background: #222226; } tr.row.on td { background: #26261f; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .sw.ring { border: 2px solid #cfcfcf; }
+  .fitbar { display: inline-block; height: 6px; background: var(--accent); border-radius: 3px; vertical-align: middle; }
+  .muted { color: var(--dim); }
+  .miss { color: var(--bad); cursor: pointer; }
+  audio { width: 100%; margin-top: 10px; }
+  .boost { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 14px; margin-top: 6px; }
+  .boost input { flex: 1; accent-color: var(--accent); }
+  .legend { color: var(--dim); font-size: 13px; line-height: 1.7; margin-top: 14px; }
+  .legend span { white-space: nowrap; margin-right: 12px; }
+  kbd { font: 12px ui-monospace, Menlo, Consolas, monospace; border: 1px solid var(--line); border-radius: 3px;
+    padding: 0 4px; color: var(--text); }
+  #tip { position: absolute; left: 10px; top: 10px; background: rgba(0,0,0,.65); padding: 5px 9px; border-radius: 4px;
+    font-size: 13px; pointer-events: none; z-index: 2; }
+  .seg { display: flex; gap: 6px; margin-top: 8px; }
+  .seg button { background: none; color: var(--text); border: 1px solid var(--line); padding: 3px 10px; font: inherit;
+    font-size: 13px; cursor: pointer; border-radius: 3px; }
+  .seg button.on { border-color: var(--accent); color: var(--accent); }
+  @media (max-width: 900px) {
+    html, body { overflow: auto; }
+    #app { grid-template-columns: 1fr; grid-template-rows: 55vh var(--spec) auto; height: auto; }
+    #panel { grid-column: 1; grid-row: 3; border-left: none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"><div id="tip"></div></div>
+  <div id="specs">
+    <div id="grip" title="drag to resize"></div>
+    <div class="cv" id="ovw"><canvas id="ovc"></canvas></div>
+    <div class="cv" id="zm"><canvas id="zmc"></canvas>
+      <div id="zbar"><button id="zprev" title="previous event  [">‹</button><button id="znext" title="next event  ]">›</button>
+        <button id="zfit" title="fit the event  0">fit</button><button id="zall" title="whole clip  Home">all</button></div></div>
+  </div>
+  <div id="panel">
+    <div class="verdict" id="verdict">–</div>
+    <div class="where" id="where">–</div>
+    <div class="sub" id="when">–</div>
+    <div class="bar"><i id="conf"></i></div>
+    <div class="sub" id="confl">–</div>
+    <audio id="audio" controls preload="metadata"></audio>
+    <label class="boost">Boost <input type="range" id="boost" min="0" max="45" step="1"> <span id="boostv"></span></label>
+    <h2>Aircraft</h2>
+    <table id="heard"><thead><tr><th></th><th>at</th><th>aircraft</th><th class="r">fit</th></tr></thead>
+      <tbody></tbody></table>
+    <div class="sub" id="unexpl"></div>
+    <h2>Missed passes</h2>
+    <div class="sub" id="silence">–</div>
+    <h2>Alternatives</h2>
+    <table id="others"><thead><tr><th>#</th><th>where</th><th class="r">score</th><th></th></tr></thead>
+      <tbody></tbody></table>
+    <div class="seg"><button id="bsat" class="on">Satellite</button><button id="btopo">Map</button>
+      <button id="bcloud" class="on">Candidates</button></div>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--accent)"></span>answer</span>
+      <span id="ltruth"><span class="sw" style="background:#5aa0ff"></span>truth</span>
+      <span><span class="sw" style="background:#7a4a10"></span>candidates</span>
+      <span><span class="sw" style="background:var(--bad)"></span>missed pass</span>
+      <br>Dots: tracked pitch. Line: predicted from the answer. Dashed grey: faint pass.
+      <br>Drag to pan, scroll to zoom. <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> move, <kbd>+</kbd> <kbd>−</kbd> zoom,
+      <kbd>[</kbd> <kbd>]</kbd> events, <kbd>space</kbd> play, <kbd>1</kbd>–<kbd>6</kbd> answers.
+    </div>
+  </div>
+</div>
+<script>
+const D = /*DATA*/null;
+const $ = id => document.getElementById(id);
+const PAL = ['#ff9900', '#4fc3f7', '#81c784', '#f06292', '#ba68c8', '#ffd54f', '#4db6ac', '#e57373'];
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const st = { sel: 0, ev: null, faint: null, cloud: true, t: 0, view: null, hover: null };
+const mmss = t => { const n = t < 0 ? '-' : ''; t = Math.abs(t); const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return `${n}${m}:${String(s).padStart(2, '0')}`; };
+const fmtT = ms => new Date(ms).toISOString().slice(11, 19);
+const R = () => D.results[st.sel];
+function dist(a, b) {
+  const k = Math.PI / 180, x = (b[1] - a[1]) * k * Math.cos((a[0] + b[0]) / 2 * k), y = (b[0] - a[0]) * k;
+  return 6371000 * Math.hypot(x, y);
+}
+const kmS = m => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10000 ? 1 : 0)} km`;
+function evColor(r, ei) { const i = r.events.findIndex(e => e.event === ei); return i < 0 ? null : PAL[i % PAL.length]; }
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+// panel
+function panel() {
+  const r = R();
+  $('ltruth').style.display = D.truth ? '' : 'none';
+  if (!r) { $('verdict').textContent = 'No match'; $('verdict').className = 'verdict no'; return; }
+  const ok = (r.confident ?? (r.margin >= 1.3 && r.events.length >= 2)) && st.sel === 0;
+  $('verdict').textContent = st.sel ? `Alternative ${st.sel + 1}` : ok ? 'Recorded here' : 'Best guess';
+  $('verdict').className = 'verdict ' + (ok || st.sel ? 'ok' : 'no');
+  const ll = `${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}`;
+  $('where').innerHTML = `<a href="https://www.google.com/maps?q=${r.lat.toFixed(5)},${r.lon.toFixed(5)}" target="_blank">${ll}</a>` +
+    `<span class="link" id="copy">copy</span>` +
+    (D.truth ? `<span class="muted"> · ${kmS(dist([r.lat, r.lon], D.truth))} off</span>` : '');
+  $('copy').onclick = () => { navigator.clipboard?.writeText(ll); $('copy').textContent = 'copied'; };
+  const sMs = Date.parse(r.start);
+  $('when').textContent = `started ${fmtT(sMs)} UTC (${new Date(sMs).toLocaleTimeString()} local)` +
+    (D.tol === null ? '' : ` · clock ${r.offset >= 0 ? '+' : ''}${r.offset.toFixed(1)} s`);
+  $('conf').style.width = Math.min(100, Math.max(4, (r.margin - 1) * 100)) + '%';
+  $('confl').textContent = `${r.margin.toFixed(2)}× next best · ${new Set([...r.events, ...(r.heard || []), ...(r.rumble || [])].map(e => e.icao)).size} aircraft` +
+    (D.temp != null && D.temp !== 15 ? ` · ${Math.round(D.temp)} °C air` : '');
+  const tb = $('heard').querySelector('tbody');
+  const fmax = Math.max(...r.events.map(e => e.fit), 1);
+  tb.innerHTML = r.events.map((e, i) => {
+    const ev = D.events[e.event];
+    return `<tr class="row${st.ev === e.event ? ' on' : ''}" data-e="${e.event}"><td><span class="sw" style="background:${PAL[i % PAL.length]}"></span></td>` +
+      `<td>${mmss(ev.t)}</td><td>${e.type || e.kind} <span class="muted">${e.icao}</span></td>` +
+      `<td class="r"><span class="fitbar" style="width:${Math.round(e.fit / fmax * 60)}px"></span> ${e.fit.toFixed(1)}</td></tr>`;
+  }).join('') + (r.heard || []).map((h, i) =>
+    `<tr class="row faint${st.faint === h ? ' on' : ''}" data-h="${i}"><td><span class="sw ring"></span></td><td>${mmss(h.t)}</td>` +
+    `<td>${h.type || h.kind} <span class="muted">${h.icao} · faint</span></td><td class="r muted">z ${h.z.toFixed(0)}</td></tr>`).join('') +
+    (r.rumble || []).map(h =>  // no tone, only louder as it passed
+    `<tr class="row faint" data-r="${h.t}"><td><span class="sw ring"></span></td><td>${mmss(h.t)}</td>` +
+    `<td>${h.type || h.kind} <span class="muted">${h.icao} · rumble</span></td><td class="r muted">+${h.db.toFixed(0)} dB</td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">none</td></tr>';
+  tb.querySelectorAll('tr[data-e]').forEach(tr => tr.onclick = () => pickEvent(+tr.dataset.e));
+  tb.querySelectorAll('tr[data-h]').forEach(tr => tr.onclick = () => pickFaint(r.heard[+tr.dataset.h]));
+  tb.querySelectorAll('tr[data-r]').forEach(tr => tr.onclick = () => seek(Math.max(0, +tr.dataset.r - 15), true));
+  const n = D.events.length - r.events.length;
+  $('unexpl').textContent = n ? `${plural(n, 'sweep')} unmatched` : '';
+  $('silence').innerHTML = r.missed.length
+    ? r.missed.map(m => `<div class="miss" data-t="${m.t}">${m.type || ''} ${m.icao} · ${mmss(m.t)} · ${kmS(m.r)}</div>`).join('') : 'none';
+  $('silence').querySelectorAll('.miss').forEach(el => el.onclick = () => seek(+el.dataset.t, true));
+  const ob = $('others').querySelector('tbody');
+  const r0 = D.results[0];
+  ob.innerHTML = D.results.map((q, i) => {
+    const why = i === 0 ? '' : q.missed.length ? `${q.missed.length} missed` :
+      q.events.length < r0.events.length ? plural(q.events.length, 'event') : 'worse fit';
+    return `<tr class="row${i === st.sel ? ' on' : ''}" data-i="${i}"><td>${i + 1}</td><td>${i === 0 ? q.lat.toFixed(4) + ', ' + q.lon.toFixed(4) : kmS(dist([q.lat, q.lon], [r0.lat, r0.lon])) + ' away'}` +
+      `<span class="muted"> · ${fmtT(Date.parse(q.start))}</span></td><td class="r">${q.score.toFixed(1)}</td><td class="r muted">${why}</td></tr>`;
+  }).join('') + (D.elsewhere || []).map(q =>  // rest of a wide search: no flights loaded for these
+    `<tr><td></td><td class="muted">${kmS(dist([q.lat, q.lon], [r0.lat, r0.lon]))} away · ${fmtT(Date.parse(q.start))}</td>` +
+    `<td class="r muted">${q.score.toFixed(1)}</td><td class="r muted">${plural(q.aircraft, 'aircraft').replace('aircrafts', 'aircraft')}</td></tr>`).join('');
+  ob.querySelectorAll('tr[data-i]').forEach(tr => tr.onclick = () => pickAnswer(+tr.dataset.i));
+}
+function pickFaint(h) {
+  const fs = h.curve[1];
+  st.ev = null; st.faint = h; st.view = clampView({ t0: h.t - 60, t1: h.t + 60, f0: Math.min(...fs) / 1.25, f1: Math.max(...fs) * 1.25 });
+  seek(Math.max(0, h.t - 20));
+}
+function pickAnswer(i) { if (!D.results[i]) return; st.sel = i; st.ev = null; st.faint = null; render(true); }
+
+// map
+const r0 = D.results[0] || { lat: (D.bbox[0] + D.bbox[1]) / 2, lon: (D.bbox[2] + D.bbox[3]) / 2 };
+const map = new maplibregl.Map({ container: 'map', center: [r0.lon, r0.lat], zoom: 11, pitch: 40, maxPitch: 80,
+  style: { version: 8, sources: {
+    sat: { type: 'raster', tileSize: 256, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'] },
+    topo: { type: 'raster', tileSize: 256, attribution: 'Tiles © Esri',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'] } },
+    layers: [{ id: 'sat', type: 'raster', source: 'sat' },
+             { id: 'topo', type: 'raster', source: 'topo', layout: { visibility: 'none' } }] } });
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+const overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+map.addControl(overlay);
+
+// track times are relative to answer 1's start
+function trackAt(tr, t) {
+  const tt = t + R().offset - D.results[0].offset;
+  const i = tr.t.findIndex(v => v >= tt);
+  if (i <= 0) return null;
+  const w = (tt - tr.t[i - 1]) / (tr.t[i] - tr.t[i - 1]);
+  const f = (a) => a[i - 1] + w * (a[i] - a[i - 1]);
+  return [f(tr.lon), f(tr.lat), f(tr.alt)];
+}
+let hoverTrack = null;
+function mapLayers() {
+  const r = R(), L = [];
+  if (st.cloud && D.cloud[0].length) {
+    const zs = D.cloud[2], zmax = Math.max(...zs), zmin = Math.min(...zs);
+    L.push(new deck.ScatterplotLayer({ id: 'cloud', data: zs.map((z, i) => i), radiusUnits: 'meters', getRadius: 110,
+      getPosition: i => [D.cloud[1][i], D.cloud[0][i]],
+      getFillColor: i => { const a = (zs[i] - zmin) / (zmax - zmin + 1e-9); return [120 + 135 * a, 70 + 83 * a, 10, 60 + 120 * a]; } }));
+  }
+  if (r) {
+    L.push(new deck.ScatterplotLayer({ id: 'region', data: r.region, radiusUnits: 'meters', getRadius: 70,
+      getPosition: p => [p[1], p[0]], getFillColor: [255, 153, 0, 70] }));
+    const paths = [], rays = [], now = [];
+    const line = tr => tr.t.map((_, k) => [tr.lon[k], tr.lat[k], tr.alt[k]]);
+    r.events.forEach((e, i) => {
+      const tr = D.tracks[e.icao]; if (!tr) return;
+      const c = hex(PAL[i % PAL.length]), ev = D.events[e.event];
+      paths.push({ path: line(tr), c, w: st.ev === e.event ? 5 : 3, ei: e.event, t: ev.t,
+        name: `${e.type || e.kind} ${e.icao} · ${mmss(ev.t)}` });
+      const p = trackAt(tr, ev.t - ev.d / 340);
+      if (p) rays.push({ from: p, to: [r.lon, r.lat, 0], c });
+      const q = trackAt(tr, st.t); if (q) now.push({ p: q, c });
+    });
+    (r.heard || []).forEach(h => { const tr = D.tracks[h.icao];
+      if (tr) paths.push({ path: line(tr), c: [207, 207, 207], w: 2, t: h.t, name: `faint: ${h.type || h.kind} ${h.icao} · ${mmss(h.t)}` }); });
+    (r.rumble || []).forEach(h => { const tr = D.tracks[h.icao];
+      if (tr) paths.push({ path: line(tr), c: [150, 150, 150], w: 1.5, t: h.t, name: `rumble: ${h.type || h.kind} ${h.icao} · ${mmss(h.t)}` }); });
+    r.missed.forEach(m => { const tr = D.tracks[m.icao];
+      if (tr) paths.push({ path: line(tr), c: [255, 107, 107], w: 2, t: m.t, name: `missed: ${m.type || ''} ${m.icao} · ${mmss(m.t)}` }); });
+    L.push(new deck.PathLayer({ id: 'tracks', data: paths, getPath: d => d.path, getColor: d => [...d.c, 230],
+      getWidth: d => d.w, widthUnits: 'pixels', pickable: true,
+      onHover: o => { hoverTrack = o.object ? o.object.name : null; map.getCanvas().style.cursor = o.object ? 'pointer' : ''; },
+      onClick: o => { o.object.ei != null ? pickEvent(o.object.ei) : seek(o.object.t, true); },
+      updateTriggers: { getWidth: st.ev } }));
+    L.push(new deck.LineLayer({ id: 'rays', data: rays, getSourcePosition: d => d.from, getTargetPosition: d => d.to,
+      getColor: d => [...d.c, 160], getWidth: 1.5 }));
+    L.push(new deck.ScatterplotLayer({ id: 'now', data: now, getPosition: d => d.p, radiusUnits: 'pixels', getRadius: 5,
+      getFillColor: d => d.c, stroked: true, getLineColor: [0, 0, 0], lineWidthUnits: 'pixels', getLineWidth: 1 }));
+  }
+  L.push(new deck.ScatterplotLayer({ id: 'answers', data: D.results.map((q, i) => ({ ...q, i })), radiusUnits: 'pixels',
+    getPosition: d => [d.lon, d.lat], getRadius: d => d.i === st.sel ? 11 : 7, filled: false, stroked: true,
+    getLineColor: d => d.i === st.sel ? [255, 153, 0] : [235, 235, 235], lineWidthUnits: 'pixels', getLineWidth: d => d.i === st.sel ? 3 : 1.5,
+    pickable: true, onClick: o => pickAnswer(o.object.i),
+    updateTriggers: { getRadius: st.sel, getLineColor: st.sel, getLineWidth: st.sel } }));
+  L.push(new deck.TextLayer({ id: 'lbl', data: D.results.map((q, i) => ({ ...q, i })), getPosition: d => [d.lon, d.lat],
+    getText: d => String(d.i + 1), getSize: 15, getPixelOffset: [14, -14], getColor: d => d.i === st.sel ? [255, 153, 0] : [235, 235, 235],
+    fontFamily: 'Palatino Linotype, Palatino, serif', outlineWidth: 3, outlineColor: [0, 0, 0], fontSettings: { sdf: true },
+    updateTriggers: { getColor: st.sel } }));
+  if (D.truth) L.push(new deck.ScatterplotLayer({ id: 'truth', data: [D.truth], getPosition: d => [d[1], d[0]], radiusUnits: 'pixels',
+    getRadius: 13, filled: false, stroked: true, getLineColor: [90, 160, 255], lineWidthUnits: 'pixels', getLineWidth: 3 }));
+  return L;
+}
+map.on('mousemove', e => { $('tip').textContent = hoverTrack || `${e.lngLat.lat.toFixed(5)}, ${e.lngLat.lng.toFixed(5)}`; });
+
+// spectrograms
+const LUT = (() => { const a = []; for (let i = 0; i < 256; i++) { const x = i / 255;
+  a.push([Math.min(255, 30 + 320 * x * x), Math.min(255, 18 + 250 * Math.pow(x, 1.6)), Math.min(255, 24 + 140 * Math.pow(x, 3))]); } return a; })();
+function image(sp) {
+  const bytes = Uint8Array.from(atob(sp.q), c => c.charCodeAt(0));
+  const cv = document.createElement('canvas'); cv.width = sp.F; cv.height = sp.K;
+  const ctx = cv.getContext('2d'), im = ctx.createImageData(sp.F, sp.K);
+  for (let f = 0; f < sp.F; f++) for (let k = 0; k < sp.K; k++) {
+    const v = LUT[bytes[f * sp.K + k]], o = ((sp.K - 1 - k) * sp.F + f) * 4;
+    im.data[o] = v[0]; im.data[o + 1] = v[1]; im.data[o + 2] = v[2]; im.data[o + 3] = 255;
+  }
+  ctx.putImageData(im, 0, 0); return cv;
+}
+const ovImg = image(D.spec);
+const patchImg = {}; for (const k in D.patches) patchImg[k] = image(D.patches[k]);
+const order = D.events.map((e, i) => i).sort((a, b) => D.events[a].t - D.events[b].t);
+const PAD = 20;  // s of black either side of the clip
+const FULL = { t0: -PAD, t1: D.dur + PAD, f0: D.spec.fmin, f1: D.spec.fmin * 2 ** (D.spec.K * D.spec.cents / 1200) };
+function clampView(v) {
+  const w = Math.min(Math.max(v.t1 - v.t0, 4), FULL.t1 - FULL.t0);
+  const t0 = Math.min(Math.max(v.t0, FULL.t0), FULL.t1 - w);
+  const k = Math.min(Math.max(v.f1 / v.f0, 1.06), FULL.f1 / FULL.f0);
+  const f0 = Math.min(Math.max(v.f0, FULL.f0), FULL.f1 / k);
+  return { t0, t1: t0 + w, f0, f1: f0 * k };
+}
+function eventView(ei) {
+  const e = D.events[ei], fs = e.pts[1];
+  return { t0: e.span[0] - PAD, t1: e.span[1] + PAD, f0: Math.min(...fs) / 1.25, f1: Math.max(...fs) * 1.25 };
+}
+function setView(v) { st.view = clampView(v); drawOverview(); drawZoom(); }
+function panView(dt, df) {  // fractions of the view
+  const v = st.view, w = v.t1 - v.t0, k = Math.pow(v.f1 / v.f0, df);
+  setView({ t0: v.t0 + dt * w, t1: v.t1 + dt * w, f0: v.f0 * k, f1: v.f1 * k });
+}
+function zoomView(kt, kf, at) {  // at: [x, y] fractions of the canvas to hold still
+  const v = st.view, [ax, ay] = at || [0.5, 0.5];
+  const tc = v.t0 + ax * (v.t1 - v.t0), w = (v.t1 - v.t0) * kt;
+  const lr = Math.log(v.f1 / v.f0), lc = Math.log(v.f0) + (1 - ay) * lr, lw = lr * kf;
+  setView({ t0: tc - ax * w, t1: tc + (1 - ax) * w, f0: Math.exp(lc - (1 - ay) * lw), f1: Math.exp(lc + ay * lw) });
+}
+function curEvent() { const r = R(); return st.ev ?? (r && r.events.length ? r.events[0].event : order.length ? order[0] : null); }
+function resetView() { const ei = curEvent(); setView(ei === null ? FULL : eventView(ei)); }
+function stepEvent(d) {
+  if (!order.length) return;
+  const i = order.indexOf(curEvent());
+  pickEvent(order[(i + d + order.length) % order.length]);
+}
+
+function fit(cv) { const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
+  if (cv.width !== Math.round(r.width * d) || cv.height !== Math.round(r.height * d)) { cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); }
+  return [cv.width, cv.height, d]; }
+function drawOverview() {
+  const cv = $('ovc'), [W, H, d] = fit(cv), ctx = cv.getContext('2d');
+  ctx.imageSmoothingEnabled = true; ctx.drawImage(ovImg, 0, 0, W, H);
+  const r = R(), x = t => t / D.dur * W;
+  D.events.forEach((e, ei) => {
+    const c = r ? evColor(r, ei) : null;
+    ctx.fillStyle = c || 'rgba(200,200,200,0.35)';
+    ctx.fillRect(x(e.t) - (c ? 1.5 : 0.5) * d, 0, (c ? 3 : 1) * d, H);
+  });
+  const v = st.view;
+  if (v) {  // what the lower panel shows
+    const a = Math.max(0, x(v.t0)), b = Math.min(W, x(v.t1));
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, a, H); ctx.fillRect(b, 0, W - b, H);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = d; ctx.strokeRect(a + d / 2, d / 2, Math.max(2 * d, b - a - d), H - d);
+  }
+  ctx.fillStyle = '#fff'; ctx.fillRect(x(st.t) - d / 2, 0, d, H);
+}
+function blit(ctx, sp, img, X, Y) {  // part of one spectrogram image inside the view
+  const v = st.view, kOf = f => Math.log(f / sp.fmin) * 1200 / Math.LN2 / sp.cents;
+  const fOf = k => sp.fmin * Math.pow(2, k * sp.cents / 1200);
+  const a = Math.max(0, (v.t0 - sp.t0) / sp.hop), b = Math.min(sp.F, (v.t1 - sp.t0) / sp.hop);
+  const k0 = Math.max(0, kOf(v.f0)), k1 = Math.min(sp.K, kOf(v.f1));
+  if (b <= a || k1 <= k0) return;
+  const x0 = X(sp.t0 + a * sp.hop), x1 = X(sp.t0 + b * sp.hop), y0 = Y(fOf(k1)), y1 = Y(fOf(k0));
+  ctx.drawImage(img, a, sp.K - k1, b - a, k1 - k0, x0, y0, x1 - x0, y1 - y0);
+}
+function drawZoom() {
+  const cv = $('zmc'), [W, H, d] = fit(cv), ctx = cv.getContext('2d');
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const r = R(), v = st.view; if (!v) return;
+  const lr = Math.log(v.f1 / v.f0);
+  const X = t => (t - v.t0) / (v.t1 - v.t0) * W, Y = f => H - Math.log(f / v.f0) / lr * H;
+  ctx.imageSmoothingEnabled = true;
+  blit(ctx, D.spec, ovImg, X, Y);
+  for (const k in D.patches) blit(ctx, D.patches[k], patchImg[k], X, Y);
+  ctx.font = `${12 * d}px Palatino`; ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = d;
+  const grid = [40, 50, 60, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1200, 1500, 2000, 3000];
+  let last = 1e9;
+  for (const hz of grid) { if (hz <= v.f0 || hz >= v.f1) continue;
+    const y = Y(hz); if (last - y < 22 * d) continue; last = y;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); ctx.fillText(`${hz} Hz`, 6 * d, y - 3 * d); }
+  const cur = curEvent();
+  D.events.forEach((e, ei) => {  // tracked pitch
+    if (e.span[1] < v.t0 || e.span[0] > v.t1) return;
+    ctx.fillStyle = ei === cur ? 'rgba(255,255,255,.9)' : 'rgba(255,255,255,.4)';
+    e.pts[0].forEach((t, i) => { ctx.beginPath(); ctx.arc(X(t), Y(e.pts[1][i]), 1.6 * d, 0, 7); ctx.fill(); });
+  });
+  if (r) r.events.forEach((ev, i) => {  // predicted from the answer; harmonics dashed
+    if (ev.curve[0][ev.curve[0].length - 1] < v.t0 || ev.curve[0][0] > v.t1) return;
+    const path = h => { ctx.beginPath(); ev.curve[0].forEach((t, j) => { const p = [X(t), Y(ev.curve[1][j] * h)]; j ? ctx.lineTo(...p) : ctx.moveTo(...p); }); ctx.stroke(); };
+    ctx.strokeStyle = PAL[i % PAL.length]; ctx.lineWidth = (ev.event === cur ? 2.5 : 1.5) * d; path(1);
+    if (ev.event === cur) { ctx.setLineDash([4 * d, 4 * d]); ctx.lineWidth = 1.2 * d; ctx.globalAlpha = .6;
+      for (const h of [2, 3, 0.5]) path(h); ctx.setLineDash([]); ctx.globalAlpha = 1; }
+  });
+  if (r) (r.heard || []).forEach(h => {  // faint passes: predicted curve only
+    if (h.curve[0][h.curve[0].length - 1] < v.t0 || h.curve[0][0] > v.t1) return;
+    ctx.strokeStyle = '#cfcfcf'; ctx.lineWidth = (h === st.faint ? 2.5 : 1.5) * d; ctx.setLineDash([8 * d, 5 * d]); ctx.beginPath();
+    h.curve[0].forEach((t, j) => { const p = [X(t), Y(h.curve[1][j])]; j ? ctx.lineTo(...p) : ctx.moveTo(...p); });
+    ctx.stroke(); ctx.setLineDash([]);
+  });
+  if (cur !== null || st.faint) {
+    const h = st.faint, e = D.events[cur], ev = r && !h ? r.events.find(q => q.event === cur) : null;
+    const title = h ? `${mmss(h.t)} · ${h.type || h.kind} ${h.icao} · faint · z ${h.z.toFixed(0)}`
+      : `${mmss(e.t)} · ${e.f0.toFixed(0)} Hz · ` + (ev ? `${ev.type || ev.kind} ${ev.icao} · fit ${ev.fit.toFixed(1)}` : 'unmatched');
+    ctx.font = `${14 * d}px Palatino`;
+    ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(0, 0, ctx.measureText(title).width + 20 * d, 28 * d);
+    ctx.fillStyle = '#fff'; ctx.fillText(title, 10 * d, 19 * d);
+  }
+  if (st.t >= v.t0 && st.t <= v.t1) { ctx.fillStyle = '#fff'; ctx.fillRect(X(st.t) - d / 2, 0, d, H); }
+  ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.font = `${12 * d}px Palatino`;
+  const step = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800].find(s => (v.t1 - v.t0) / s <= W / d / 90) || 3600;
+  for (let t = Math.ceil(Math.max(v.t0, 0) / step) * step; t < Math.min(v.t1, D.dur); t += step) {
+    ctx.fillRect(X(t), H - 4 * d, d, 4 * d); ctx.fillText(mmss(t), X(t) + 3 * d, H - 6 * d); }
+  if (st.hover) {  // time and pitch under the pointer
+    const t = v.t0 + st.hover[0] * (v.t1 - v.t0), f = v.f0 * Math.exp((1 - st.hover[1]) * lr);
+    const s = `${mmss(t)} · ${f.toFixed(0)} Hz`, w = ctx.measureText(s).width + 12 * d;
+    const x = Math.min(st.hover[0] * W + 12 * d, W - w), y = Math.max(st.hover[1] * H - 10 * d, 44 * d);
+    ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fillRect(x, y - 15 * d, w, 20 * d);
+    ctx.fillStyle = '#fff'; ctx.fillText(s, x + 6 * d, y);
+  }
+}
+function seek(t, center) {
+  t = Math.min(Math.max(t, 0), D.dur); st.t = t; audio.currentTime = t;
+  if (center && st.view) { const w = st.view.t1 - st.view.t0; st.view = clampView({ ...st.view, t0: t - w / 2, t1: t + w / 2 }); }
+  render();
+}
+function pickEvent(ei) {
+  st.ev = ei; st.faint = null; st.view = clampView(eventView(ei));
+  st.t = Math.max(0, D.events[ei].span[0] - 5); audio.currentTime = st.t; render();
+}
+function nearestEvent(t, tol) {
+  let best = null, bd = tol; D.events.forEach((e, i) => { const dd = Math.abs(e.t - t); if (dd < bd) { bd = dd; best = i; } });
+  return best;
+}
+
+// overview strip: click or drag to scrub
+const ovw = $('ovw');
+let scrub = false;
+function scrubTo(e) {
+  const rect = ovw.getBoundingClientRect(), t = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1) * D.dur;
+  const w = st.view.t1 - st.view.t0;
+  st.t = t; st.view = clampView({ ...st.view, t0: t - w / 2, t1: t + w / 2 });
+  drawOverview(); drawZoom();
+  return t;
+}
+ovw.onpointerdown = e => { ovw.setPointerCapture(e.pointerId); scrub = true; scrubTo(e); };
+ovw.onpointermove = e => { if (scrub) scrubTo(e); };
+ovw.onpointerup = e => {
+  if (!scrub) return; scrub = false;
+  const t = scrubTo(e), ei = nearestEvent(t, 20);
+  if (ei !== null) st.ev = ei;
+  audio.currentTime = t; render();
+};
+
+// lower panel: drag pans, wheel zooms, click seeks
+const zm = $('zm');
+let drag = null;
+const frac = e => { const r = zm.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
+zm.onpointerdown = e => {
+  if (e.target.closest('#zbar')) return;
+  zm.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, v: { ...st.view }, moved: false };
+};
+zm.onpointermove = e => {
+  st.hover = frac(e);
+  if (drag) {
+    const r = zm.getBoundingClientRect(), dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; zm.classList.add('drag'); }
+    if (drag.moved) {
+      const dt = -dx / r.width * (drag.v.t1 - drag.v.t0), k = Math.pow(drag.v.f1 / drag.v.f0, dy / r.height);
+      st.hover = null;
+      return setView({ t0: drag.v.t0 + dt, t1: drag.v.t1 + dt, f0: drag.v.f0 * k, f1: drag.v.f1 * k });
+    }
+  }
+  drawZoom();
+};
+zm.onpointerup = e => {
+  if (!drag) return;
+  const moved = drag.moved; drag = null; zm.classList.remove('drag');
+  if (moved) return;
+  const [fx, fy] = frac(e), v = st.view, t = v.t0 + fx * (v.t1 - v.t0), f = v.f0 * Math.pow(v.f1 / v.f0, 1 - fy);
+  // a click on a tracked ridge selects that event
+  let best = null, bd = 0.08;
+  D.events.forEach((ev, i) => { if (t < ev.span[0] || t > ev.span[1]) return;
+    const j = ev.pts[0].findIndex(x => x >= t), dd = Math.abs(Math.log(f / ev.pts[1][Math.max(j, 0)])) / Math.log(v.f1 / v.f0);
+    if (dd < bd) { bd = dd; best = i; } });
+  if (best !== null) { st.ev = best; st.faint = null; }
+  seek(t);
+};
+zm.onpointerleave = () => { st.hover = null; drawZoom(); };
+zm.ondblclick = e => { if (!e.target.closest('#zbar')) resetView(); };
+zm.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return panView(e.deltaX / zm.clientWidth, 0);
+  const k = Math.exp(e.deltaY * (e.deltaMode ? 0.05 : 0.0015));
+  e.shiftKey || e.ctrlKey ? zoomView(1, k, frac(e)) : zoomView(k, 1, frac(e));
+}, { passive: false });
+$('zprev').onclick = () => stepEvent(-1); $('znext').onclick = () => stepEvent(1);
+$('zfit').onclick = resetView; $('zall').onclick = () => setView(FULL);
+
+// drag the bar above the spectrograms to resize them
+const grip = $('grip');
+const setSpec = h => { document.documentElement.style.setProperty('--spec', `${Math.min(Math.max(h, 140), innerHeight - 160)}px`);
+  map.resize(); drawOverview(); drawZoom(); };
+try { const h = +localStorage.getItem('specH'); if (h) setSpec(h); } catch (e) {}
+grip.onpointerdown = e => { grip.setPointerCapture(e.pointerId); grip.classList.add('on'); };
+grip.onpointermove = e => { if (grip.classList.contains('on')) setSpec(innerHeight - e.clientY); };
+grip.onpointerup = () => { grip.classList.remove('on');
+  try { localStorage.setItem('specH', parseInt(getComputedStyle(document.documentElement).getPropertyValue('--spec'))); } catch (e) {} };
+
+// audio
+const audio = $('audio'); audio.src = D.audio;
+// quiet clips: gain to about -20 dBFS plus a compressor (needs http, not file://)
+const auto = D.level ? Math.max(0, Math.min(45, Math.round(-20 - D.level.rms_db))) : 0;
+let gainNode = null;
+$('boost').value = auto; $('boostv').textContent = `+${auto} dB`;
+function setGain() { const db = +$('boost').value; $('boostv').textContent = `+${db} dB`;
+  if (gainNode) gainNode.gain.value = Math.pow(10, db / 20); }
+audio.addEventListener('play', () => {
+  if (gainNode || location.protocol === 'file:') return;
+  try {
+    const ctx = new AudioContext(), src = ctx.createMediaElementSource(audio);
+    gainNode = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -12; comp.knee.value = 6; comp.ratio.value = 8;
+    src.connect(gainNode).connect(comp).connect(ctx.destination);
+    setGain();
+  } catch (e) { console.warn('no boost:', e); }
+});
+$('boost').oninput = setGain;
+audio.ontimeupdate = () => {
+  st.t = audio.currentTime;
+  const v = st.view;  // keep the playhead in view while playing
+  if (!audio.paused && !drag && !scrub && (st.t < v.t0 || st.t > v.t1)) {
+    const w = v.t1 - v.t0; st.view = clampView({ ...v, t0: st.t - 0.1 * w, t1: st.t + 0.9 * w }); }
+  drawOverview(); drawZoom(); overlay.setProps({ layers: mapLayers() });
+};
+
+// keys
+window.addEventListener('keydown', e => {
+  const tag = e.target.tagName;
+  if (e.metaKey || e.ctrlKey || e.altKey || tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && e.target.type !== 'range')) return;
+  const big = e.shiftKey ? 4 : 1, k = e.key;
+  const act = k === 'ArrowLeft' ? () => panView(-0.15 * big, 0) : k === 'ArrowRight' ? () => panView(0.15 * big, 0)
+    : k === 'ArrowUp' ? () => panView(0, 0.15 * big) : k === 'ArrowDown' ? () => panView(0, -0.15 * big)
+    : k === '+' || k === '=' ? () => zoomView(0.7, 1) : k === '-' || k === '_' ? () => zoomView(1 / 0.7, 1)
+    : k === '[' ? () => stepEvent(-1) : k === ']' ? () => stepEvent(1)
+    : k === '0' ? resetView : k === 'Home' ? () => setView(FULL)
+    : k === ' ' ? () => (audio.paused ? audio.play() : audio.pause())
+    : /^[1-9]$/.test(k) ? () => pickAnswer(+k - 1) : null;
+  if (!act) return;
+  e.preventDefault(); if (tag === 'AUDIO' || tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
+  act();
+});
+
+$('bsat').onclick = () => { map.setLayoutProperty('sat', 'visibility', 'visible'); map.setLayoutProperty('topo', 'visibility', 'none');
+  $('bsat').classList.add('on'); $('btopo').classList.remove('on'); };
+$('btopo').onclick = () => { map.setLayoutProperty('topo', 'visibility', 'visible'); map.setLayoutProperty('sat', 'visibility', 'none');
+  $('btopo').classList.add('on'); $('bsat').classList.remove('on'); };
+$('bcloud').onclick = () => { st.cloud = !st.cloud; $('bcloud').classList.toggle('on', st.cloud); render(); };
+function render(fly) {
+  if (!st.view) { const ei = curEvent(); st.view = clampView(ei === null ? FULL : eventView(ei)); }
+  panel(); drawOverview(); drawZoom(); overlay.setProps({ layers: mapLayers() });
+  if (fly && R()) map.flyTo({ center: [R().lon, R().lat], zoom: Math.max(map.getZoom(), 11) });
+}
+window.addEventListener('resize', () => { drawOverview(); drawZoom(); });
+map.on('load', () => render());
+render();
+</script>
+</body>
+</html>

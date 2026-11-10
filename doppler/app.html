@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doppler Locate</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --bg: #111; --panel: #1b1b1b; --line: #333; --text: #eee; --dim: #999; --accent: #ff9900; --bad: #ff6b6b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px "Palatino Linotype", Palatino, "Book Antiqua", serif; }
+  #app { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+  #side { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  #side h1 { font-size: 20px; font-weight: normal; margin: 14px 16px 8px; }
+  #list { flex: 1; overflow-y: auto; }
+  .item { padding: 9px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .item:hover { background: #222; } .item.on { border-left: 3px solid var(--accent); padding-left: 13px; background: #222; }
+  #list { overflow-x: hidden; }
+  .item .t { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .item .s { font-size: 13px; color: var(--dim); margin-top: 2px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #444; margin-right: 3px; }
+  .dot.on { background: var(--accent); }
+  #add { margin: 12px 16px 16px; }
+  #main { display: flex; flex-direction: column; min-width: 0; }
+  #tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); padding: 0 16px; }
+  #tabs button { background: none; border: none; color: var(--dim); font: inherit; padding: 12px 14px; cursor: pointer;
+    border-bottom: 2px solid transparent; }
+  #tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  #tabs .title { margin-left: auto; align-self: center; color: var(--dim); font-size: 14px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+  #setup { padding: 16px; overflow-y: auto; display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 18px; flex: 1; }
+  #result { flex: 1; display: none; } #result iframe { width: 100%; height: 100%; border: 0; }
+  label { display: block; color: var(--dim); font-size: 13px; margin: 10px 0 3px; }
+  input[type=text], input[type=number], input[type=datetime-local] { width: 100%; color-scheme: dark; background: #0c0c0c; color: var(--text); border: 1px solid var(--line);
+    padding: 6px 8px; font: 14px ui-monospace, Menlo, Consolas, monospace; border-radius: 3px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button.act { background: none; color: var(--text); border: 1px solid var(--line); padding: 7px 14px; font: inherit;
+    cursor: pointer; border-radius: 3px; margin-top: 14px; margin-right: 6px; }
+  button.act.primary { border-color: var(--accent); color: var(--accent); }
+  button.act:disabled { opacity: .4; cursor: default; }
+  #map { height: 340px; border: 1px solid var(--line); border-radius: 3px; }
+  #steps { margin-top: 16px; }
+  .step { margin-bottom: 12px; }
+  .step .hd { display: flex; justify-content: space-between; font-size: 14px; }
+  .step .hd .r { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .step.pending .hd { color: var(--dim); }
+  .step.error .hd, .step.error .hd .r { color: var(--bad); }
+  .bar { height: 6px; background: #262626; border-radius: 3px; margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .5s; }
+  .step.done .bar i { background: #6b6b6b; }
+  .step.running.indet .bar i { width: 30% !important; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  .step .msg { font-size: 12px; color: var(--dim); margin-top: 3px; min-height: 14px; }
+  #logwrap summary { color: var(--dim); font-size: 13px; cursor: pointer; margin-top: 6px; }
+  #log { background: #0c0c0c; border: 1px solid var(--line); border-radius: 3px; padding: 8px; margin-top: 8px;
+    font: 12px ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; height: 260px; overflow-y: auto; color: #ccc; }
+  .note { color: var(--dim); font-size: 14px; margin-top: 6px; } .note a { color: var(--accent); }
+  .hint { color: var(--dim); font-size: 13px; margin-top: 4px; }
+  #empty { padding: 30px; color: var(--dim); }
+  body.drop #app { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  @media (max-width: 900px) { #app { grid-template-columns: 1fr; height: auto; } #setup { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Doppler locate</h1>
+    <div id="list"></div>
+    <div id="add">
+      <label>Add a file (or drop one anywhere)</label><input type="file" id="file" accept="audio/*,video/*">
+      <label>YouTube link</label><input type="text" id="yurl" placeholder="https://youtube.com/watch?v=…">
+      <div class="row" style="margin-top:6px"><input type="text" id="yoff" placeholder="from 0:00:00" title="live streams: how long before now the clip ends"><input type="number" id="ylen" placeholder="15 min"></div>
+      <button class="act" id="yadd" style="margin-top:8px">Add</button> <span class="hint" id="yerr"></span>
+    </div>
+  </div>
+  <div id="main">
+    <div id="tabs"><button id="tsetup" class="on">Setup</button><button id="tresult">Result</button><span class="title" id="title"></span></div>
+    <div id="empty">Pick a clip, or add one.</div>
+    <div id="setup" style="display:none">
+      <div>
+        <div class="note" id="note"></div>
+        <label>Local time · time zone</label>
+        <div class="row"><input type="datetime-local" id="ltime" step="1"><input type="text" id="tz" list="tzs"></div>
+        <datalist id="tzs"></datalist>
+        <label>at video time</label><input type="text" id="vpos" placeholder="0:00">
+        <div class="hint" id="utc"></div>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--text)">
+          <input type="checkbox" id="unk" style="accent-color:var(--accent)"> Time unknown
+          <span class="hint">(searches the whole day)</span></label>
+        <label>Center (click map) · radius km</label>
+        <div class="row3"><input type="number" id="clat" step="0.0001" placeholder="lat"><input type="number" id="clon" step="0.0001" placeholder="lon"><input type="number" id="rad" step="1" placeholder="km"></div>
+        <label>Ground elevation (m)</label><input type="number" id="elev" step="1">
+        <label>Truth (shift-click map)</label>
+        <div class="row"><input type="number" id="tlat" step="0.0001" placeholder="lat"><input type="number" id="tlon" step="0.0001" placeholder="lon"></div>
+        <label>Clock ± s</label><input type="number" id="ctol" step="1">
+        <label style="display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--text)">
+          <input type="checkbox" id="jets" style="accent-color:var(--accent)"> Jets <span class="hint">(slower)</span></label>
+        <button class="act" id="save">Save</button><button class="act primary" id="run" title="Ctrl+Enter">Run</button><button class="act" id="del" style="float:right">Remove</button>
+        <button class="act" id="cancel" style="display:none">Cancel</button>
+        <div id="steps"></div>
+        <details id="logwrap"><summary>Log</summary><pre id="log"></pre></details>
+      </div>
+      <div id="map"></div>
+    </div>
+    <div id="result"><iframe id="frame"></iframe></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let items = [], cur = null, poll = null, map = null;
+
+async function refresh(keep) {
+  items = await (await fetch('/api/clips')).json();
+  $('list').innerHTML = items.map(c => {
+    const pct = c.progress != null ? ` ${Math.round(c.progress * 100)}%` : '';
+    const m = c.meta, st = c.job === 'running' ? (c.kind === 'download' ? 'downloading' : 'running') + pct
+      : c.job === 'error' ? 'error' : !c.ready ? 'no audio' : (m.start || 'no start time').replace('T', ' ').replace('Z', '');
+    return `<div class="item${cur === c.name ? ' on' : ''}" data-n="${c.name}"><div class="t">${m.title || c.name}</div>` +
+      `<div class="s"><span class="dot${c.has.tracks ? ' on' : ''}" title="tracks"></span><span class="dot${c.has.heat ? ' on' : ''}" title="search"></span>` +
+      `<span class="dot${c.has.viz ? ' on' : ''}" title="viewer"></span> ${st}</div></div>`;
+  }).join('') || '<div class="item s" style="cursor:default">No clips yet. Run <span style="font-family:monospace">python samples/get_samples.py --synth</span></div>';
+  if (keep && cur) show(cur, true);
+}
+$('list').addEventListener('click', e => { const el = e.target.closest('.item[data-n]'); if (el) show(el.dataset.n); });
+
+// local wall time in a zone, optionally at some point in the video, to UTC clip start
+const TZ0 = Intl.DateTimeFormat().resolvedOptions().timeZone;
+$('tzs').innerHTML = [...(Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : []), 'UTC']
+  .map(z => `<option value="${z}">`).join('');
+function tzOff(ms, tz) {  // UTC offset of the zone at instant ms
+  const s = Math.floor(ms / 1000) * 1000;
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric',
+    month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+    .formatToParts(new Date(s)).map(x => [x.type, +x.value]));
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - s;
+}
+function localToUTC(s, tz) { const g = Date.parse(s + 'Z'); return g - tzOff(g - tzOff(g, tz), tz); }
+function utcToLocal(ms, tz) { return new Date(ms + tzOff(ms, tz)).toISOString().slice(0, 19); }
+function hms(t) { t = Math.round(t); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`; }
+function meta() { const c = items.find(i => i.name === cur); return c ? c.meta : {}; }
+function clipStart() {  // UTC ms of the clip's first sample; null if no time, NaN if the zone is unknown
+  const s = $('ltime').value; if (!s) return null;
+  try { return localToUTC(s.length === 16 ? s + ':00' : s, $('tz').value.trim() || TZ0)
+    - (secs($('vpos').value) - (meta().offset || 0)) * 1000; } catch (e) { return NaN; }
+}
+function showUTC() {
+  const t = clipStart();
+  $('utc').textContent = t === null ? 'no time set' : isNaN(t) ? 'unknown time zone'
+    : `clip starts ${new Date(t).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
+}
+['ltime', 'tz', 'vpos'].forEach(id => $(id).addEventListener('input', showUTC));
+
+function val(id) { const v = $(id).value.trim(); return v === '' ? null : +v; }
+function show(name, quiet, nowatch) {
+  cur = name; const c = items.find(i => i.name === name); if (!c) return;
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('on', el.dataset.n === name));
+  $('empty').style.display = 'none'; $('title').textContent = c.meta.title || name;
+  if (!quiet) {
+    const m = c.meta;
+    $('note').innerHTML = [m.note, m.source && m.source.startsWith('http') ? `<a href="${m.source}" target="_blank">source</a>` : ''].filter(Boolean).join(' · ');
+    const tz = m.tz || TZ0, at = m.at || 0;
+    $('tz').value = tz; $('vpos').value = at ? hms(at) : ''; $('unk').checked = !!m.unknown_time;
+    $('ltime').value = m.start ? utcToLocal(Date.parse(m.start) + (at - (m.offset || 0)) * 1000, tz) : '';
+    showUTC(); $('elev').value = m.elev ?? 0; $('rad').value = m.radius_km ?? 20;
+    $('clat').value = m.center ? m.center[0] : ''; $('clon').value = m.center ? m.center[1] : '';
+    $('tlat').value = m.truth ? m.truth[0] : ''; $('tlon').value = m.truth ? m.truth[1] : '';
+    $('ctol').value = m.clock_tol ?? 30; $('log').textContent = ''; $('steps').innerHTML = '';
+    tab(c.has.viz ? 'result' : 'setup');
+    drawRegion(true);
+  }
+  $('run').disabled = c.job === 'running' || !c.ready;
+  if (c.job && !nowatch) watch(name);
+}
+function tab(t) {
+  $('tsetup').classList.toggle('on', t === 'setup'); $('tresult').classList.toggle('on', t === 'result');
+  $('setup').style.display = t === 'setup' ? 'grid' : 'none'; $('result').style.display = t === 'result' ? 'block' : 'none';
+  if (t === 'result') { const c = items.find(i => i.name === cur);
+    if (c && c.has.viz) { const src = `/clips/${cur}/viz/index.html?${Date.now()}`; if (!$('frame').src.includes(`/clips/${cur}/`)) $('frame').src = src; }
+    else $('frame').srcdoc = '<body style="background:#111;color:#999;font-family:Palatino,serif;padding:30px">Run it first.</body>'; }
+  if (t === 'setup' && map) setTimeout(() => map.resize(), 0);
+}
+$('tsetup').onclick = () => tab('setup'); $('tresult').onclick = () => tab('result');
+
+function form() {
+  const c = [val('clat'), val('clon')], t = [val('tlat'), val('tlon')];
+  const ts = clipStart(), o = isNaN(ts) ? {} : { start: ts === null ? null : new Date(ts).toISOString().replace('.000Z', 'Z') };
+  return { ...o, unknown_time: $('unk').checked, tz: $('tz').value.trim() || TZ0, at: secs($('vpos').value) || null, center: c.includes(null) ? null : c, radius_km: val('rad'),
+           elev: val('elev') ?? 0, truth: t.includes(null) ? null : t, clock_tol: val('ctol') ?? 30 };
+}
+async function save() {
+  await fetch(`/api/meta/${cur}`, { method: 'POST', body: JSON.stringify(form()) }); await refresh();
+}
+$('save').onclick = save;
+$('del').onclick = async () => {
+  if (!confirm(`Remove ${cur} and its results?`)) return;
+  await fetch(`/api/delete/${cur}`, { method: 'POST' }); cur = null;
+  $('setup').style.display = 'none'; $('result').style.display = 'none'; $('empty').style.display = 'block';
+  $('empty').textContent = 'Pick a clip, or add one.'; $('title').textContent = ''; await refresh();
+};
+$('cancel').onclick = () => fetch(`/api/cancel/${cur}`, { method: 'POST' });
+$('run').onclick = async () => {
+  await save(); $('log').textContent = ''; $('steps').innerHTML = '';
+  await fetch(`/api/run/${cur}`, { method: 'POST', body: JSON.stringify({ clock_tol: val('ctol'), jets: $('jets').checked }) });
+  await refresh(); $('run').disabled = true; watch(cur);
+};
+function dur(s) { return s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`; }
+function drawSteps(j) {
+  $('steps').innerHTML = (j.steps || []).map(s => {
+    let r = '';
+    if (s.state === 'running') {
+      const el = j.now - s.t0;
+      r = s.frac > 0 ? `${Math.round(s.frac * 100)}%` : '';
+      if (s.frac > 0.03 && el > 3) r += ` · ~${dur(el * (1 - s.frac) / s.frac)} left`;
+      else r += (r ? ' · ' : '') + dur(el);
+    } else if (s.state === 'done') r = dur(s.t1 - s.t0);
+    else if (s.state !== 'pending') r = s.state;
+    const indet = s.state === 'running' && !(s.frac > 0) ? ' indet' : '';
+    return `<div class="step ${s.state}${indet}"><div class="hd"><span>${s.label}</span><span class="r">${r}</span></div>` +
+      `<div class="bar"><i style="width:${Math.round((s.state === 'done' ? 1 : s.frac) * 100)}%"></i></div>` +
+      `<div class="msg">${s.state === 'running' ? s.msg : ''}</div></div>`;
+  }).join('');
+}
+function watch(name) {
+  clearInterval(poll);
+  const tick = async () => {
+    const j = await (await fetch(`/api/job/${name}`)).json();
+    if (name !== cur) return;
+    drawSteps(j);
+    $('cancel').style.display = j.state === 'running' ? 'inline-block' : 'none';
+    const L = $('log'), stick = L.scrollTop + L.clientHeight >= L.scrollHeight - 5;
+    L.textContent = j.log || ''; if (stick) L.scrollTop = L.scrollHeight;
+    if (j.state === 'error') $('logwrap').open = true;
+    if (j.state !== 'running') { clearInterval(poll); if (j.renamed) cur = j.renamed; await refresh();
+      // a finished download reloads the form; watching again would loop
+      if (j.kind === 'download') { show(cur, false, true); drawSteps(j); $('log').textContent = j.log || '';
+        if (j.state === 'error') $('logwrap').open = true; }
+      else if (j.state === 'done') { $('frame').src = `/clips/${cur}/viz/index.html?${Date.now()}`; tab('result'); } }
+  };
+  tick(); poll = setInterval(tick, 1000);
+}
+
+// upload: the file input, or a file dropped anywhere
+async function upload(f) {
+  if (!f) return;
+  $('empty').style.display = 'block'; $('empty').textContent = `uploading ${f.name}…`;
+  const r = await (await fetch(`/api/upload?filename=${encodeURIComponent(f.name)}`, { method: 'POST', body: f })).json();
+  await refresh(); show(r.name);
+}
+$('file').addEventListener('change', async e => { await upload(e.target.files[0]); e.target.value = ''; });
+window.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('drop'); });
+window.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('drop'); });
+window.addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('drop'); upload(e.dataTransfer.files[0]); });
+
+// youtube
+function secs(t) { return (t || '0').split(':').reduce((a, v) => a * 60 + (+v || 0), 0); }
+$('yadd').onclick = async () => {
+  const url = $('yurl').value.trim(); if (!url) return; $('yerr').textContent = '';
+  const r = await fetch('/api/youtube', { method: 'POST', body: JSON.stringify({ url, offset: secs($('yoff').value),
+    length: 60 * (val('ylen') || 15) }) });
+  const j = await r.json(); if (!r.ok) { $('yerr').textContent = j.error; return; }
+  $('yurl').value = ''; await refresh(); show(j.name); tab('setup'); watch(j.name);
+};
+
+$('yurl').addEventListener('keydown', e => { if (e.key === 'Enter') $('yadd').click(); });
+
+// keys: ctrl+enter runs, up/down pick a clip, 1/2 switch tabs
+window.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { if (cur && !$('run').disabled) $('run').click(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey || ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    const i = items.findIndex(c => c.name === cur) + (e.key === 'ArrowDown' ? 1 : -1);
+    if (items[i]) { e.preventDefault(); show(items[i].name);
+      document.querySelector(`.item[data-n="${CSS.escape(items[i].name)}"]`)?.scrollIntoView({ block: 'nearest' }); }
+  } else if (cur && e.key === '1') tab('setup'); else if (cur && e.key === '2') tab('result');
+});
+
+// region map
+function initMap() {
+  map = new maplibregl.Map({ container: 'map', center: [0, 30], zoom: 1.5,
+    style: { version: 8, sources: { topo: { type: 'raster', tileSize: 256, attribution: 'Tiles © Esri',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'] } },
+      layers: [{ id: 'topo', type: 'raster', source: 'topo' }] } });
+  map.on('style.load', () => {
+    const empty = { type: 'FeatureCollection', features: [] };
+    map.addSource('box', { type: 'geojson', data: empty });
+    map.addSource('pts', { type: 'geojson', data: empty });
+    map.addLayer({ id: 'boxf', type: 'fill', source: 'box', paint: { 'fill-color': '#ff9900', 'fill-opacity': 0.12 } });
+    map.addLayer({ id: 'boxl', type: 'line', source: 'box', paint: { 'line-color': '#ff9900', 'line-width': 2 } });
+    map.addLayer({ id: 'pts', type: 'circle', source: 'pts',
+      paint: { 'circle-radius': 6, 'circle-color': '#50aaff', 'circle-stroke-color': '#000', 'circle-stroke-width': 1.5 } });
+    drawRegion(true);
+  });
+  new ResizeObserver(() => map.resize()).observe($('map'));
+  map.on('click', e => {
+    const id = e.originalEvent.shiftKey ? ['tlat', 'tlon'] : ['clat', 'clon'];
+    $(id[0]).value = e.lngLat.lat.toFixed(5); $(id[1]).value = e.lngLat.lng.toFixed(5); drawRegion(false);
+  });
+}
+function drawRegion(fit) {
+  if (!map) return;
+  map.resize();
+  if (!map.getSource('box')) return;
+  const f = form(), box = [], pts = [];
+  if (f.center) {
+    const r = f.radius_km || 20, dl = r / 111.32, dn = r / (111.32 * Math.cos(f.center[0] * Math.PI / 180));
+    const [a, b] = f.center, ring = [[b - dn, a - dl], [b + dn, a - dl], [b + dn, a + dl], [b - dn, a + dl], [b - dn, a - dl]];
+    box.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } });
+    if (fit) map.fitBounds([[b - dn, a - dl], [b + dn, a + dl]], { padding: 30, duration: 0 });
+  }
+  if (f.truth) pts.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [f.truth[1], f.truth[0]] } });
+  map.getSource('box').setData({ type: 'FeatureCollection', features: box });
+  map.getSource('pts').setData({ type: 'FeatureCollection', features: pts });
+}
+['clat', 'clon', 'rad', 'tlat', 'tlon'].forEach(id => $(id).addEventListener('change', () => drawRegion(id === 'rad')));
+
+setInterval(() => { if (items.some(c => c.job === 'running')) refresh(); }, 3000);
+initMap(); refresh().then(() => { const n = new URLSearchParams(location.search).get('clip'); if (n) show(n); });
+</script>
+</body>
+</html>
