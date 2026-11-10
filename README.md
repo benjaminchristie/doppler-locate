@@ -13,6 +13,8 @@ The method is mostly his, but I made several changes to make the code more
 automated and performant. Also, I was able to extend his idea to *jet* aircraft
 and not just propeller-driven aircraft. More on that below.
 
+![The result page for the video's recording: map with the answer and the matched flights, spectrogram below](docs/viewer.jpg)
+
 ## Problem
 
 A propeller makes a steady tone. As the plane passes, the tone you hear drops in pitch (Doppler)
