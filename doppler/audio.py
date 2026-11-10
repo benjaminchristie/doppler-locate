@@ -1,9 +1,9 @@
+# audio in: ffmpeg decode, container metadata, spectrograms
 import json
 import re
 import subprocess
 
 import numpy as np
-from scipy.ndimage import median_filter
 
 from .timeutil import parse_time
 
@@ -96,39 +96,3 @@ def viterbi(L, max_jump, penalty):
     for j in range(nt - 1, 0, -1):
         path[j - 1] = path[j] - back[path[j], j]
     return path
-
-
-# track the dominant tone in a time/frequency box, optionally stacking harmonics
-# returns times (s from file start), freqs (Hz, sub-bin), snr (mean dB above median)
-def extract_ridge(x, sr, t_lo, t_hi, f_lo, f_hi, win_s=1.0, hop_s=0.1,
-                  max_slope=20.0, penalty=0.5, harmonics=1):
-    a, b = int(max(0, t_lo) * sr), min(int(t_hi * sr), len(x))
-    times, fr, P = stft_band(x[a:b], sr, win_s, hop_s, f_lo, min(harmonics * f_hi, sr / 2 - 1))
-    Lall = np.clip(whiten_db(P), -10, 40)
-    df = fr[1] - fr[0]
-    freqs = fr[fr <= f_hi]
-    idx = [np.clip(np.round((k * freqs - fr[0]) / df).astype(int), 0, len(fr) - 1)
-           for k in range(1, harmonics + 1)]
-    L = np.mean([Lall[i] for i in idx], axis=0)
-    J = max(1, int(np.ceil(max_slope * hop_s / df)))
-    path = viterbi(L, J, penalty)
-    # parabolic sub-bin refinement on the stacked score
-    k = np.clip(path, 1, len(freqs) - 2)
-    cols = np.arange(len(k))
-    y0, y1, y2 = L[k - 1, cols], L[k, cols], L[k + 1, cols]
-    den = y0 - 2 * y1 + y2
-    with np.errstate(invalid="ignore", divide="ignore"):
-        off = np.where(np.abs(den) > 1e-9, 0.5 * (y0 - y2) / den, 0.0)
-    f = freqs[k] + np.clip(off, -1, 1) * df
-    snr = median_filter(L[path, cols], size=max(3, int(1.0 / hop_s) | 1), mode="nearest")
-    return times + a / sr, f, snr
-
-
-# frames above min_snr, dropping runs shorter than min_run_s
-def keep_mask(t, snr, min_snr, min_run_s=3.0):
-    m = snr >= min_snr
-    edges = np.flatnonzero(np.diff(np.r_[0, m.astype(int), 0]))
-    for s, e in zip(edges[::2], edges[1::2]):
-        if t[e - 1] - t[s] < min_run_s:
-            m[s:e] = False
-    return m

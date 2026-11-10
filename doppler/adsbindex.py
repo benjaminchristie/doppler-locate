@@ -160,9 +160,3 @@ def write_csv(path, tracks, info):
                 w.writerow([k, round(row[0], 2), round(row[1], 6), round(row[2], 6), round(row[3], 1),
                             "" if np.isnan(row[4]) else round(row[4], 2), "" if np.isnan(row[5]) else round(row[5], 1),
                             "" if np.isnan(row[6]) else round(row[6], 2), typ, cat])
-
-
-def built_days(store=DEFAULT_STORE):
-    if not os.path.isdir(store):
-        return []
-    return sorted(d for d in os.listdir(store) if os.path.exists(os.path.join(store, d, "aircraft.json")))

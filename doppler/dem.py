@@ -57,13 +57,6 @@ def elevation(lat, lon, z=ZOOM):
     return out
 
 
-# elevation at local enu points (x east, y north, m) around (lat0, lon0)
-def grid_elevation(lat0, lon0, x, y):
-    from .model import from_enu
-    la, lo = from_enu(np.asarray(x, float), np.asarray(y, float), lat0, lon0)
-    return elevation(la, lo)
-
-
 # elevation on a local enu grid over a bbox, for fast lookups of many points
 class Grid:
 

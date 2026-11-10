@@ -1,20 +1,18 @@
+# command line: python -m doppler COMMAND; find and serve are the ones the README uses
 import argparse
-import csv
 import json
 import os
 import sys
 
-import numpy as np
-
-from . import adsb, audio, plot
-from .locate import Flyover, Locator, _dist
-from .model import line_logratio, sound_speed
+from . import adsb, audio
+from .model import to_enu
 from .progress import report
 
-MIN_RIDGE_S = 15.0
-MIN_SCORE = 3.0  # below this no aircraft curve clearly fits anywhere
-MIN_SUPPORT = 2  # one pass fits a whole line of places; it takes two aircraft to pin one
-MIN_MARGIN = 1.3  # best spot vs the best one more than 1 km away; real soundscapes give chance matches
+
+# metres between two points
+def _dist(lat, lon, lat0, lon0):
+    e, n, _ = to_enu(lat, lon, 0, lat0, lon0)
+    return float((e * e + n * n) ** 0.5)
 
 
 def clip_start(a, path):
@@ -33,38 +31,6 @@ def cmd_probe(a):
         print(f"location tag: {p['location']}")
 
 
-def cmd_spec(a):
-    x = audio.load_audio(a.file, a.sr)
-    lo, hi = a.t if a.t else (0, len(x) / a.sr)
-    x = x[int(lo * a.sr):int(hi * a.sr)]
-    t, f, P = audio.stft_band(x, a.sr, a.win, a.hop, a.fmin, a.fmax, pad=1)
-    plot.spectrogram(t + lo, f, audio.whiten_db(P), a.out)
-    print(a.out)
-
-
-def cmd_ridge(a):
-    c = sound_speed(a.temp)
-    x = audio.load_audio(a.file, a.sr)
-    t, f, snr = audio.extract_ridge(x, a.sr, *a.t, *a.f, win_s=a.win, hop_s=a.hop,
-                                    harmonics=a.harmonics)
-    with open(a.out, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["t", "f", "snr"])
-        w.writerows(np.round(np.c_[t, f, snr], 4).tolist())
-    m = audio.keep_mask(t, snr, a.min_snr)
-    print(f"{m.sum()}/{len(t)} frames >= {a.min_snr} dB")
-    if m.sum() * a.hop < MIN_RIDGE_S:
-        print(f"under {MIN_RIDGE_S:.0f} s of usable ridge, too weak to use")
-        return
-    fit = Flyover(t[m], f[m], c).fit
-    print("closest approach at {t0:.1f} s, distance {d:.0f} m, speed {v:.0f} m/s, "
-          "f0 {f0:.1f} Hz, rms {rms_cents:.1f} cents".format(**fit))
-    tt, ff, P = audio.stft_band(x[int(a.t[0] * a.sr):int(a.t[1] * a.sr)], a.sr, a.win, a.hop, *a.f)
-    curve = fit["f0"] * np.exp(line_logratio(t, fit["t0"], fit["d"], fit["v"], c))
-    plot.spectrogram(tt + a.t[0], ff, audio.whiten_db(P), a.out.rsplit(".", 1)[0] + ".png",
-                     ridge=(t[m], f[m]), fit_curve=(t, curve))
-
-
 def cmd_adsb(a):
     from . import adsbindex
     t0, t1 = adsb.parse_time(a.start), adsb.parse_time(a.end)
@@ -77,84 +43,6 @@ def cmd_adsb(a):
         adsb.fetch_recent(t0, t1, a.bbox, a.out, workers=a.workers)
         return
     adsb.fetch(t0, t1, a.bbox, a.out, tar_paths=a.tar, workers=a.workers, mlat=a.mlat)
-
-
-def cmd_locate(a):
-    c = sound_speed(a.temp)
-    start = clip_start(a, a.video)
-    flys = []
-    for path in a.ridges:
-        d = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
-        m = audio.keep_mask(d[:, 0], d[:, 2], a.min_snr)
-        span = m.sum() * np.median(np.diff(d[:, 0]))
-        if span < MIN_RIDGE_S:
-            print(f"{path}: only {span:.0f} s usable, skipped")
-            continue
-        fo = Flyover(d[m, 0], d[m, 1], c, path)
-        print(f"{path}: {span:.0f} s usable  d={fo.fit['d']:.0f} m  v={fo.fit['v']:.0f} m/s  "
-              f"t0={fo.fit['t0']:.1f} s")
-        flys.append(fo)
-    if not flys:
-        sys.exit("no usable flyovers")
-    segs = adsb.segments(adsb.load_csv(a.tracks))
-    print(f"{len(segs)} track segments")
-    loc = Locator(flys, segs, start, c, elev=a.elev, clock_tol=a.clock_tol, bbox=a.bbox)
-    res = loc.run()
-    if not res:
-        sys.exit("no candidates: check time, bbox, and that the aircraft is in the ADS-B data")
-    for i, r in enumerate(res[:a.top]):
-        print(f"{i + 1:2d}. {r['lat']:.6f}, {r['lon']:.6f}  clock {r['clock_offset']:+.1f} s  "
-              f"rms {r['rms_cents']:.2f} cents  {r['per_flyover_cents']}  {r['icao']}")
-    if len(flys) == 1:
-        print("one flyover: mirror-image and coincidental matches are likely, treat as unverified")
-    alt = [r for r in res[1:] if _dist(r["lat"], r["lon"], res[0]["lat"], res[0]["lon"]) > 500]
-    if alt:
-        margin = alt[0]["rms_cents"] / res[0]["rms_cents"]
-        print(f"margin over best answer >500 m away: {margin:.2f}x"
-              + ("  (ambiguous)" if margin < 1.5 else ""))
-    if a.truth:
-        _, _, ids = loc.evaluate(*a.truth, 0.0)
-        la, lo, dt = loc.refine(*a.truth, 0.0, ids)
-        cost, costs, ids = loc.evaluate(la, lo, dt)
-        print(f"at truth: rms {cost:.2f} cents {[round(x, 2) for x in costs]} clock {dt:+.1f} s "
-              f"{[s['icao'] if s else None for s in ids]} (refined {_dist(la, lo, *a.truth):.0f} m away)")
-    with open(a.out, "w") as fh:
-        json.dump([{k: v for k, v in r.items() if k != "_segs"} for r in res[:a.top]], fh, indent=1)
-    plot.result(loc, res[0], segs, a.out.rsplit(".", 1)[0] + ".png", truth=a.truth)
-
-
-def cmd_heat(a):
-    from . import heatmap
-    c = sound_speed(a.temp)
-    start = clip_start(a, a.video or a.file)
-    if a.jets:  # fan tones reach a few kHz; fringes need the broadband roar
-        a.sr, a.fmax, a.sources = max(a.sr, 8000), max(a.fmax, 3000), "all"
-    x = audio.load_audio(a.file, a.sr)
-    tracks, kind = adsb.load_csv(a.tracks, with_kind=True)
-    segs = adsb.segments(tracks, kind=kind)
-    src = None if a.sources == "all" else ("prop", "heli", "unknown")
-    res, hm = heatmap.search(x, a.sr, start, segs, a.bbox, c, elev=a.elev, clock_tol=a.clock_tol,
-                             step=a.step, fmin=a.fmin, fmax=a.fmax, harmonics=a.harmonics,
-                             sources=src, absent_penalty=a.absent, r_max=a.rmax, jets=a.jets,
-                             progress=lambda f, m: report("search", f, m))
-    report("search", 1.0, "done")
-    if not res or res[0]["score"] < MIN_SCORE:
-        print(f"no confident match (best score {res[0]['score'] if res else 0:.1f}, need {MIN_SCORE:g})")
-    elif res[0].get("support", 0) < MIN_SUPPORT:
-        print(f"no confident match (best spot fits {res[0].get('support', 0)} aircraft, need {MIN_SUPPORT})")
-    elif res[0].get("margin", 99) < MIN_MARGIN:
-        print(f"no confident match (best spot only {res[0]['margin']:.2f}x the next one over 1 km away, need {MIN_MARGIN:g})")
-    for i, r in enumerate(res[:a.top]):
-        d = f"  {_dist(r['lat'], r['lon'], *a.truth):.0f} m from truth" if a.truth else ""
-        print(f"{i + 1:2d}. {r['lat']:.6f}, {r['lon']:.6f}  score {r['score']:.1f}  {r.get('support', 0)} aircraft  "
-              f"clock {r['clock_offset']:+.2f} s  loudest {r['icao']} @ {r['f0']:.0f} Hz{d}")
-    if res and res[0]["score"] >= MIN_SCORE:
-        print(f"margin over the next spot over 1 km away: {res[0].get('margin', 0):.2f}x")
-    t, f, L, sigma = hm["spec"]
-    np.savez_compressed(a.out, Z=hm["Z"], lat=hm["lat"], lon=hm["lon"], bbox=a.bbox, start=start,
-                        temp=a.temp, elev=a.elev, results=json.dumps(res), times=t, freqs=f,
-                        L=L, truth=a.truth or [], clock_tol=a.clock_tol, jets=a.jets)
-    print(a.out)
 
 
 def cmd_find(a):
@@ -272,11 +160,6 @@ def cmd_adsb_index(a):
     adsbindex.build(date.fromisoformat(a.date), a.store, tar_paths=a.tar, workers=a.workers)
 
 
-def cmd_viz(a):
-    from . import viz
-    print(viz.build(a.heat, a.clip, a.tracks, a.out))
-
-
 def cmd_serve(a):
     from . import serve
     serve.main(a.port)
@@ -295,30 +178,6 @@ def main():
     s = sub.add_parser("probe", help="start time / location tags from metadata")
     s.add_argument("file")
     s.set_defaults(fn=cmd_probe)
-
-    s = sub.add_parser("spec", help="whitened spectrogram PNG for finding flyovers")
-    s.add_argument("file")
-    s.add_argument("-o", "--out", default="spec.png")
-    s.add_argument("--t", nargs=2, type=float)
-    s.add_argument("--fmin", type=float, default=20)
-    s.add_argument("--fmax", type=float, default=1000)
-    s.add_argument("--win", type=float, default=0.5)
-    s.add_argument("--hop", type=float, default=0.25)
-    s.add_argument("--sr", type=int, default=8000)
-    s.set_defaults(fn=cmd_spec)
-
-    s = sub.add_parser("ridge", help="track one Doppler tone in a time/frequency box")
-    s.add_argument("file")
-    s.add_argument("--t", nargs=2, type=float, required=True, metavar=("T0", "T1"))
-    s.add_argument("--f", nargs=2, type=float, required=True, metavar=("F0", "F1"))
-    s.add_argument("-o", "--out", required=True)
-    s.add_argument("--win", type=float, default=1.0)
-    s.add_argument("--hop", type=float, default=0.1)
-    s.add_argument("--sr", type=int, default=8000)
-    s.add_argument("--temp", type=float, default=15.0, help="air temperature, C")
-    s.add_argument("--min-snr", type=float, default=9.0)
-    s.add_argument("--harmonics", type=int, default=1, help="stack this many harmonics")
-    s.set_defaults(fn=cmd_ridge)
 
     s = sub.add_parser("adsb", help="pull tracks from adsb.lol archives")
     s.add_argument("--start", required=True, help="ISO time, UTC")
@@ -340,46 +199,6 @@ def main():
     s.add_argument("--workers", type=int, default=8)
     s.set_defaults(fn=cmd_adsb_index)
 
-    s = sub.add_parser("locate", help="match ridges against ADS-B tracks")
-    s.add_argument("ridges", nargs="+")
-    s.add_argument("--tracks", required=True)
-    s.add_argument("--bbox", nargs=4, type=float, required=True, metavar=("LAT0", "LAT1", "LON0", "LON1"))
-    g = s.add_mutually_exclusive_group(required=True)
-    g.add_argument("--video", help="read start time from metadata")
-    g.add_argument("--start", help="ISO start time of the clip, UTC")
-    s.add_argument("--temp", type=float, default=15.0)
-    s.add_argument("--elev", type=float, default=0.0, help="ground elevation at recorder, m MSL")
-    s.add_argument("--clock-tol", type=float, default=30.0, help="+- seconds of start-time error")
-    s.add_argument("--min-snr", type=float, default=9.0)
-    s.add_argument("--truth", nargs=2, type=float, metavar=("LAT", "LON"))
-    s.add_argument("--top", type=int, default=10)
-    s.add_argument("-o", "--out", default="result.json")
-    s.set_defaults(fn=cmd_locate)
-
-    s = sub.add_parser("heat", help="grid search by matched filtering (no ridges needed)")
-    s.add_argument("file")
-    s.add_argument("--tracks", required=True)
-    s.add_argument("--bbox", nargs=4, type=float, required=True, metavar=("LAT0", "LAT1", "LON0", "LON1"))
-    s.add_argument("--video", help="read start time from this file instead")
-    s.add_argument("--start", help="ISO start time of the clip, UTC")
-    s.add_argument("--clock-tol", type=float, default=2.0)
-    s.add_argument("--step", type=float, default=250.0, help="coarse grid spacing, m")
-    s.add_argument("--fmin", type=float, default=50)
-    s.add_argument("--fmax", type=float, default=600)
-    s.add_argument("--harmonics", type=int, default=1)
-    s.add_argument("--sources", choices=["tonal", "all"], default="tonal",
-                   help="tonal: props, helicopters and unknown types; all: jets too")
-    s.add_argument("--absent", type=float, default=0.0, help="penalty for a close tonal plane not heard")
-    s.add_argument("--rmax", type=float, default=8000.0, help="ignore aircraft farther than this, m")
-    s.add_argument("--jets", action="store_true", help="also use jets: fan tones and ground-reflection fringes")
-    s.add_argument("--temp", type=float, default=15.0)
-    s.add_argument("--elev", type=float, default=0.0)
-    s.add_argument("--sr", type=int, default=4000)
-    s.add_argument("--truth", nargs=2, type=float, metavar=("LAT", "LON"))
-    s.add_argument("--top", type=int, default=8)
-    s.add_argument("-o", "--out", default="heat.npz")
-    s.set_defaults(fn=cmd_heat)
-
     s = sub.add_parser("find", help="event-based search: Doppler events, flights that fit, silence, exact curves")
     s.add_argument("file")
     s.add_argument("--tracks", help="ADS-B CSV; default: the local index (adsb-index)")
@@ -392,7 +211,7 @@ def main():
     s.add_argument("--date", help="time unknown: search this whole UTC day (YYYY-MM-DD)")
     s.add_argument("--clock-tol", type=float, default=30.0)
     s.add_argument("--elev", type=float, default=None, help="flat ground at this height (m); default terrain tiles")
-    s.add_argument("--temp", type=float, default=None, help="air temperature at the ground, C; fitted if not given")
+    s.add_argument("--temp", type=float, default=None, help="air temperature at the ground, C; default: looked up, else fitted")
     s.add_argument("--lapse", type=float, default=6.5, help="K per km of height the air cools by")
     s.add_argument("--jets", action="store_true", help="also consider jets")
     s.add_argument("--sr", type=int, default=4000)
@@ -401,13 +220,6 @@ def main():
     s.add_argument("-o", "--out", default="find.json")
     s.add_argument("--viz", help="also write the viewer to this directory")
     s.set_defaults(fn=cmd_find)
-
-    s = sub.add_parser("viz", help="browser viewer for a heat result")
-    s.add_argument("heat")
-    s.add_argument("--clip", required=True)
-    s.add_argument("--tracks", required=True)
-    s.add_argument("-o", "--out", default="viz")
-    s.set_defaults(fn=cmd_viz)
 
     s = sub.add_parser("serve", help="local web app over ./clips")
     s.add_argument("--port", type=int, default=8080)

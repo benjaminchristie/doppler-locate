@@ -1,3 +1,4 @@
+# geometry and physics shared by everything: local enu frame, sound speed, doppler of a straight pass
 import numpy as np
 
 R_EARTH = 6371000.0
@@ -59,12 +60,3 @@ def fit_line_at(t, f, c, v, fit, pad=15.0):
     lf0 = np.log(fit["f0"])
     return _fit(t, np.log(f), c, [[fit["t0"], np.log(fit["d"]), v, lf0]],
                 [t[0] - pad, np.log(30), v, lf0 - 0.5], [t[-1] + pad, np.log(30000), v, lf0 + 0.5])
-
-
-# predicted log(f_obs/f0) at reception times t_query (unix s) for one track segment
-def seg_logratio(seg, lat, lon, elev, t_query, c):
-    e, n, u = to_enu(seg["lat"], seg["lon"], seg["alt"], lat, lon, elev)
-    r = np.sqrt(e * e + n * n + u * u)
-    rdot = (e * seg["ve"] + n * seg["vn"] + u * seg["vu"]) / r
-    t_rec = seg["t"] + r / c
-    return np.interp(t_query, t_rec, -np.log1p(rdot / c), left=np.nan, right=np.nan)

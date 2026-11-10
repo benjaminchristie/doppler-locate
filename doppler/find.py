@@ -3,8 +3,9 @@
 # 2. candidates: strips beside each matching flight's track, as 200 m cells and 3 s clock-offset bins
 # 3. z screen (mf.cpp), ridge fit, then refine the best (both sides of a straight pass)
 # 4. each place is scored by everything it explains: tracked events, faint passes found along their
-#    predicted curves (heard), minus close passes that are missing
+#    predicted curves (heard), aircraft heard only as a rise in level (roar), minus close passes that are missing
 # 5. start known and the events don't settle it: add the peaks of the grid search (heatmap.search)
+# sound speed follows the air temperature, which falls with height (_air)
 import time
 import warnings
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from scipy.spatial import cKDTree
 
 from . import dem as demmod
 from . import heatmap
-from .model import CENTS, from_enu, sound_speed
+from .model import CENTS, from_enu, sound_speed, to_enu
 
 TONAL = ("prop", "heli", "unknown")
 
@@ -214,7 +215,6 @@ def candidates(events, flights, S, tol, dgrid, cell=200.0, obin=3.0, c=340.0, r_
 
 
 def _dist(a, b):
-    from .model import to_enu
     e, n, _ = to_enu(a["lat"], a["lon"], 0, b["lat"], b["lon"])
     return float(np.hypot(e, n))
 
@@ -743,7 +743,6 @@ def curve_region(S, flights, hs, x, y, o, dgrid, spec, c, tol=None, frac=0.85, h
 def _setup(x, sr, S, dur, segs, bbox, events, tol=30.0, temp_c=15.0, sources=TONAL, elev=None, spec=None,
            dem_step=None, rspec=None, trace=True, lapse=6.5, roar=True):
     from .events import ridge_spectrogram, spectrogram
-    from .model import to_enu
     A = SimpleNamespace(x=x, sr=sr, S=S, dur=dur, tol=tol, bbox=bbox, sources=sources, elev=elev, segs=segs)
     A.events = [e for e in events if e["v"] >= 20 and e["d"] >= 120]  # boats, cars, people: nothing flies that close
     A.c = sound_speed(temp_c)
@@ -852,7 +851,8 @@ def _place(A, f, r_loud=1500.0, guided=True):
     la, lo = from_enu(f["x"], f["y"], A.lat0, A.lon0)
     return dict(lat=float(la), lon=float(lo),
                 score=sum(v for _, v in f["explained"].values()) + f["extra"] + tie - 3.0 * len(ms),
-                match_score=f["score"], extra=f["extra"], tie=round(tie, 2), offset=f["offset"], n_events=f["n_events"], grid=f.get("grid"),
+                match_score=f["score"], extra=f["extra"], tie=round(tie, 2), offset=f["offset"],
+                n_events=f["n_events"], grid=f.get("grid"),
                 heard=[dict(icao=flights[fi]["icao"], kind=flights[fi]["kind"], fi=fi, z=round(z, 1),
                             excess=round(ex, 1), r=round(r), t=round(t, 1), f0=round(f0, 1))
                        for fi, z, ex, r, t, f0 in f["heard"]],
@@ -915,7 +915,6 @@ def _verdict(out, tail=False):
 def search(x, sr, S, dur, segs, bbox, events, tol=30.0, temp_c=15.0, cell=200.0, obin=3.0, r_loud=1500.0,
            n_fine=40, sources=TONAL, elev=None, guided=True, grid=True, grid_s=180.0, n_region=6, lone=600000,
            spec=None, rspec=None, trace=True, lapse=6.5, sweep=True, roar=True, log=print):
-    from .model import to_enu
     t_start, say = time.time(), log
     log = lambda m: say(f"{m}  [{time.time() - t_start:.0f} s]")
     A = _setup(x, sr, S, dur, segs, bbox, events, tol, temp_c, sources, elev, spec, None, rspec, trace, lapse, roar)
@@ -1016,12 +1015,12 @@ def fit_temp(x, sr, S, dur, segs, events, r, km=3.0, slack=4.0, temps=np.arange(
 # everything the viewer shows, as json-able data
 def summary(x, sr, S, dur, results, info, tol, bbox, types=None, truth=None, n=6):
     import base64
+    from datetime import datetime, timezone
     from .events import ridge_spectrogram
     flights, events, dgrid, c = info["flights"], info["events"], info["dgrid"], info["c"]
     lat0, lon0 = info["lat0"], info["lon0"]
     types = types or {}
-    iso = lambda t: __import__("datetime").datetime.fromtimestamp(t, __import__("datetime").timezone.utc) \
-        .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-5] + "Z"
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-5] + "Z"
 
     def thin(a, k):
         a = np.asarray(a)

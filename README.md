@@ -101,7 +101,10 @@ the top answer is within 1 km of the truth, by search radius:
 - One pass alone usually fits several places. Two or more passes pin it down.
 - Speech, wind, traffic and hum hide the tones or imitate them.
 - The answer moves about 100 m for every 3 °C of error in the air temperature when the planes are far away.
-- A whole day over the whole US takes an hour or more on a modern desktop.
+- Without the start time it is much worse. Five-minute simulated clips in a 600 km box: 10 of 16 right with the
+  start known, 3 of 16 with only a two-hour window.
+- A whole day over the whole US took 91 minutes for the video's recording on a 24-core desktop. The right place
+  came first, but not by enough to call it.
 
 ## Q-A
 
