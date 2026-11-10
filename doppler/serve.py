@@ -105,16 +105,16 @@ def run_job(name, opts):
         side = max((bb[1] - bb[0]) * 111.32, (bb[3] - bb[2]) * 111.32 * math.cos(math.radians((bb[0] + bb[1]) / 2)))
         days = adsbindex.days_between(parse_time(want["start"]).timestamp(), parse_time(want["end"]).timestamp())
         tiled = not have.get("synthetic") and (side > 150 or (meta.get("unknown_time") and side > 50)) and \
-            not any(adsb.recent(day_ts(day)) and not adsbindex.has_days(day_ts(day), day_ts(day)) for day in days)
+            not any(adsb.recent(day_ts(d0)) and not adsbindex.has_days(day_ts(d0), day_ts(d0)) for d0 in days)
         if tiled:
-            for day in days:
-                if not adsbindex.has_days(day_ts(day), day_ts(day)):
-                    steps.append((f"ADS-B index for {day}", py + ["adsb-index", "--date", day.isoformat()]))
+            for d0 in days:
+                if not adsbindex.has_days(day_ts(d0), day_ts(d0)):
+                    steps.append((f"ADS-B index for {d0}", py + ["adsb-index", "--date", d0.isoformat()]))
         elif not tracks_ok:
-            for day in days:
+            for d0 in days:
                 # recent days come from adsb.lol's replay files instead (see adsb.fetch_recent)
-                if not adsbindex.has_days(day_ts(day), day_ts(day)) and not adsb.recent(day_ts(day)):
-                    steps.append((f"ADS-B index for {day}", py + ["adsb-index", "--date", day.isoformat()]))
+                if not adsbindex.has_days(day_ts(d0), day_ts(d0)) and not adsb.recent(day_ts(d0)):
+                    steps.append((f"ADS-B index for {d0}", py + ["adsb-index", "--date", d0.isoformat()]))
             steps.append(("Flight tracks", py + ["adsb", "--start", want["start"], "--end", want["end"],
                                                  "--bbox", *map(str, bb), "-o", os.path.join(d, "tracks.csv")]))
         # event-based search (find): terrain from elevation tiles, so the page's elevation field isn't used
